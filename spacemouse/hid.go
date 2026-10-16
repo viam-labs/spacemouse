@@ -15,6 +15,7 @@ import (
 // would apply, so we don't re-emit when the user holds a steady deflection.
 const axisEpsilon = 1.0 / 350.0
 
+// Reader runs the HID I/O loop for a single SpaceMouse device.
 type Reader struct {
 	dev     Device
 	serial  string
@@ -43,6 +44,7 @@ var hidOpen = func(vid, pid uint16, serial string) (hidHandle, error) {
 	return hid.Open(vid, pid, serial)
 }
 
+// NewReader constructs a Reader for the given device entry.
 func NewReader(d Device, serial string, logger logging.Logger, onEvent func(input.Event)) *Reader {
 	// Seed to false so the first report doesn't fire ButtonRelease for a button that was never pressed.
 	initialButtons := make(map[input.Control]bool, len(d.Buttons))
@@ -58,14 +60,17 @@ func NewReader(d Device, serial string, logger logging.Logger, onEvent func(inpu
 	}
 }
 
+// Device returns the device entry this Reader was built for.
 func (r *Reader) Device() Device { return r.dev }
 
+// Connected reports whether the HID handle is currently open.
 func (r *Reader) Connected() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.connected
 }
 
+// Snapshot returns the last-seen axis values and button states.
 func (r *Reader) Snapshot() ([6]float64, map[input.Control]bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -77,6 +82,7 @@ func (r *Reader) Snapshot() ([6]float64, map[input.Control]bool) {
 	return axes, buttons
 }
 
+// Run drives the open → read → close → retry cycle until ctx is cancelled.
 func (r *Reader) Run(ctx context.Context) {
 	backoff := 250 * time.Millisecond
 	for {
@@ -265,6 +271,7 @@ func abs(x float64) float64 {
 	return x
 }
 
+// EnumerateConnected returns every supported SpaceMouse currently plugged in.
 func EnumerateConnected() ([]DeviceInstance, error) {
 	if err := hid.Init(); err != nil {
 		return nil, err
@@ -286,6 +293,7 @@ func EnumerateConnected() ([]DeviceInstance, error) {
 	return dedupe(found), nil
 }
 
+// DeviceInstance is a connected device plus its HID path and serial number.
 type DeviceInstance struct {
 	Device       Device
 	SerialNumber string

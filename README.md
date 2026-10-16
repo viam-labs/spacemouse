@@ -5,7 +5,7 @@ with a sibling discovery service that enumerates connected devices.
 
 ## Models
 
-### `viam-labs:spacemouse:controller` (input_controller)
+### `viam:spacemouse:controller` (input_controller)
 
 Config:
 
@@ -13,7 +13,7 @@ Config:
 {
   "name": "my-spacemouse",
   "api": "rdk:component:input_controller",
-  "model": "viam-labs:spacemouse:controller",
+  "model": "viam:spacemouse:controller",
   "attributes": {
     "vendor_id": "256f",
     "product_id": "c63a"
@@ -30,7 +30,7 @@ Config:
 Run the discovery service once to find the IDs for the device plugged in.
 Axis values are normalized to `[-1, 1]`.
 
-### `viam-labs:spacemouse:discovery` (discovery service)
+### `viam:spacemouse:discovery` (discovery service)
 
 Returns one suggested `input_controller` config per connected supported
 device. Useful during setup to see what the host currently sees without

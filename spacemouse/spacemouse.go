@@ -7,21 +7,23 @@ import (
 	"sync"
 
 	"github.com/pkg/errors"
-	"go.viam.com/utils"
-
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/utils"
 )
 
-var Model = resource.NewModel("viam-labs", "spacemouse", "controller")
+// Model is the registered Viam model for this input_controller.
+var Model = resource.NewModel("viam", "spacemouse", "controller")
 
+// Config picks a specific SpaceMouse by USB vendor/product ID and optional serial.
 type Config struct {
 	VendorID  string `json:"vendor_id"`
 	ProductID string `json:"product_id"`
 	Serial    string `json:"serial,omitempty"`
 }
 
+// Validate requires vendor_id and product_id and checks they parse as hex.
 func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.VendorID == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "vendor_id")

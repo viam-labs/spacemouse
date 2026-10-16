@@ -7,8 +7,10 @@ import (
 	"go.viam.com/rdk/components/input"
 )
 
+// AxisIndex enumerates the six SpaceMouse axes.
 type AxisIndex int
 
+// Axis identifiers, in the device-table order X, Y, Z, RX, RY, RZ.
 const (
 	AxisX AxisIndex = iota
 	AxisY
@@ -18,6 +20,7 @@ const (
 	AxisRZ
 )
 
+// Control returns the Viam input.Control that corresponds to this axis.
 func (a AxisIndex) Control() input.Control {
 	return [...]input.Control{
 		input.AbsoluteX,
@@ -29,12 +32,14 @@ func (a AxisIndex) Control() input.Control {
 	}[a]
 }
 
+// AxisMapping locates a signed 16-bit LE axis sample within a HID report.
 type AxisMapping struct {
 	ReportID uint8
 	Offset   int
 	Sign     int
 }
 
+// ButtonMapping locates a button bit within a HID report and maps it to a Viam control.
 type ButtonMapping struct {
 	ReportID uint8
 	Byte     int
@@ -42,6 +47,7 @@ type ButtonMapping struct {
 	Control  input.Control
 }
 
+// Device is one entry in the HID device table.
 type Device struct {
 	Name      string
 	VendorID  uint16
@@ -200,6 +206,7 @@ func proButtons() []ButtonMapping {
 	}
 }
 
+// Controls returns the Viam input.Controls this device exposes (6 axes + buttons).
 func (d Device) Controls() []input.Control {
 	controls := []input.Control{
 		input.AbsoluteX, input.AbsoluteY, input.AbsoluteZ,
@@ -211,6 +218,7 @@ func (d Device) Controls() []input.Control {
 	return controls
 }
 
+// LookupDevice returns the device matching the given VID/PID, or nil.
 func LookupDevice(vendorID, productID uint16) *Device {
 	for i := range deviceTable {
 		if deviceTable[i].VendorID == vendorID && deviceTable[i].ProductID == productID {
@@ -220,12 +228,14 @@ func LookupDevice(vendorID, productID uint16) *Device {
 	return nil
 }
 
+// SupportedDevices returns a copy of the device table.
 func SupportedDevices() []Device {
 	out := make([]Device, len(deviceTable))
 	copy(out, deviceTable)
 	return out
 }
 
+// ParseAxis reads one axis sample from a HID report, normalized to [-1, 1].
 func (d Device) ParseAxis(report []byte, axis AxisIndex) (float64, bool) {
 	m := d.Axes[axis]
 	if len(report) == 0 || report[0] != m.ReportID {
@@ -244,6 +254,7 @@ func (d Device) ParseAxis(report []byte, axis AxisIndex) (float64, bool) {
 	return v, true
 }
 
+// ParseButtons reads button bits from a HID report into a control→pressed map.
 func (d Device) ParseButtons(report []byte) map[input.Control]bool {
 	out := map[input.Control]bool{}
 	if len(report) == 0 {
@@ -262,6 +273,7 @@ func (d Device) ParseButtons(report []byte) map[input.Control]bool {
 	return out
 }
 
+// ReportIDs returns the distinct report IDs this device uses for axes and buttons.
 func (d Device) ReportIDs() []uint8 {
 	seen := map[uint8]bool{}
 	for _, a := range d.Axes {

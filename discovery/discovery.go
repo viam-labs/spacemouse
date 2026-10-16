@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/pkg/errors"
-
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -17,10 +16,10 @@ import (
 	"github.com/viam-labs/spacemouse/spacemouse"
 )
 
-// Model is the discovery service model. Namespace matches the input_controller model.
-var Model = resource.NewModel("viam-labs", "spacemouse", "discovery")
+// Model is the discovery service model for SpaceMouse enumeration.
+var Model = resource.NewModel("viam", "spacemouse", "discovery")
 
-// Config is empty for now.
+// Config is empty — the service enumerates all supported devices on the host.
 type Config struct {
 	resource.TriviallyValidateConfig
 }
