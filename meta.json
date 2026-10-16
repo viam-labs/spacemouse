@@ -16,6 +16,12 @@
       "model": "viam:spacemouse:discovery",
       "short_description": "Enumerates connected SpaceMouse devices as suggested input_controller configs.",
       "markdown_link": "README.md"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "viam:spacemouse:jog",
+      "short_description": "Jogs an arm's end effector from any input_controller exposing six absolute axes.",
+      "markdown_link": "README.md"
     }
   ],
   "applications": null,
