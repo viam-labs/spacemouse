@@ -36,6 +36,34 @@ Returns one suggested `input_controller` config per connected supported
 device. Useful during setup to see what the host currently sees without
 having to run `lsusb`.
 
+### `viam:spacemouse:jog` (generic service)
+
+Jogs an arm's end effector from any `input_controller` exposing six absolute
+axes. Release the controller to stop.
+
+```json
+{
+  "name": "my-jog",
+  "api": "rdk:service:generic",
+  "model": "viam:spacemouse:jog",
+  "attributes": {
+    "arm": "my-arm",
+    "input_controller": "my-spacemouse"
+  }
+}
+```
+
+| field                     | required | default | notes                                   |
+|---------------------------|----------|---------|-----------------------------------------|
+| `arm`                     | yes      | —       | Arm resource name.                      |
+| `input_controller`        | yes      | —       | input_controller resource name.         |
+| `deadband`                | no       | `0.05`  | Below this axis magnitude, no motion.   |
+| `translation_mm_per_sec`  | no       | `100`   | Translation speed at full axis.         |
+| `rotation_deg_per_sec`    | no       | `45`    | Rotation speed at full axis.            |
+| `tick_hz`                 | no       | `50`    | Drain loop rate.                        |
+
+Operates in the arm's base frame. No safety gates — the operator is the deadman.
+
 ## Host setup
 
 Requires `hidapi` (Linux) or `hidapi` from Homebrew (macOS):
