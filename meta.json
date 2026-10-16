@@ -1,0 +1,35 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "viam-labs:spacemouse",
+  "visibility": "public",
+  "url": "https://github.com/viam-labs/spacemouse",
+  "description": "3Dconnexion SpaceMouse support as a Viam input_controller plus a discovery service.",
+  "models": [
+    {
+      "api": "rdk:component:input_controller",
+      "model": "viam-labs:spacemouse:controller",
+      "short_description": "Exposes a 3Dconnexion SpaceMouse as a Viam input_controller with 6 absolute axes and buttons.",
+      "markdown_link": "README.md"
+    },
+    {
+      "api": "rdk:service:discovery",
+      "model": "viam-labs:spacemouse:discovery",
+      "short_description": "Enumerates connected SpaceMouse devices as suggested input_controller configs.",
+      "markdown_link": "README.md"
+    }
+  ],
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/spacemouse",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ]
+  }
+}

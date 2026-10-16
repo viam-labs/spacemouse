@@ -1,0 +1,14 @@
+.DS_Store
+*.swp
+
+tmp
+
+bin
+*.exe
+*.dylib
+*.so
+
+module.tar.gz
+.VIAM_RELOAD_ARCHIVE.tar.gz
+
+coverage.out
