@@ -38,7 +38,7 @@ motion via the motion service's teleop pipeline.
 | `translation_mm_per_sec`  | `100`      | EE speed at full stick.                                                  |
 | `rotation_deg_per_sec`    | `45`       | EE rotation speed at full stick.                                         |
 | `tick_hz`                 | `50`       | Drain loop rate.                                                         |
-| `lookahead_sec`           | `0.3`      | How far ahead the goal pose is placed each tick.                         |
+| `lookahead_ms`            | `300`      | How far ahead the goal pose is placed each tick.                         |
 | `pos_deadband_mm`         | `1.0`      | Minimum pose change to re-send; skips sub-threshold updates.             |
 | `rot_deadband_deg`        | `1.0`      | Same, rotation.                                                          |
 | `error_cooldown_ms`       | `1000`     | How long to skip sends after a `teleop_move` failure.                    |

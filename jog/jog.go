@@ -30,7 +30,7 @@ const (
 	defaultTranslationMMPerSec = 100.0
 	defaultRotationDegPerSec   = 45.0
 	defaultTickHz              = 50.0
-	defaultLookaheadSec        = 0.3
+	defaultLookaheadMs         = 300
 	defaultMotionName          = "motion"
 	defaultPosDeadbandMM       = 1.0
 	defaultRotDeadbandDeg      = 1.0
@@ -50,8 +50,8 @@ type Config struct {
 	RotationDegPerSec   *float64 `json:"rotation_deg_per_sec,omitempty"`
 	TickHz              *float64 `json:"tick_hz,omitempty"`
 
-	// LookaheadSec is how far into the future each goal pose is placed.
-	LookaheadSec *float64 `json:"lookahead_sec,omitempty"`
+	// LookaheadMs is how far into the future each goal pose is placed.
+	LookaheadMs *float64 `json:"lookahead_ms,omitempty"`
 
 	// Pose-change thresholds below which we skip the teleop_move send.
 	// Prevents planner thrash from sub-mm/sub-degree input jitter.
@@ -162,7 +162,7 @@ func newJog(
 		transPerSec:    firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
 		rotPerSec:      firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
 		tickInterval:   tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
-		lookaheadSec:   firstNonNil(cfg.LookaheadSec, defaultLookaheadSec),
+		lookaheadSec:   firstNonNil(cfg.LookaheadMs, defaultLookaheadMs) / 1000,
 		posDeadbandMM:  firstNonNil(cfg.PosDeadbandMM, defaultPosDeadbandMM),
 		rotDeadbandDeg: firstNonNil(cfg.RotDeadbandDeg, defaultRotDeadbandDeg),
 		errorCooldown:  time.Duration(firstNonNil(cfg.ErrorCooldownMs, defaultErrorCooldownMs)) * time.Millisecond,
@@ -188,7 +188,7 @@ func newJog(
 		"input_controller", cfg.InputName,
 		"motion", motionName,
 		"tick_interval_ms", j.tickInterval.Milliseconds(),
-		"lookahead_sec", j.lookaheadSec,
+		"lookahead_ms", j.lookaheadSec*1000,
 		"pos_deadband_mm", j.posDeadbandMM,
 		"rot_deadband_deg", j.rotDeadbandDeg,
 	)
