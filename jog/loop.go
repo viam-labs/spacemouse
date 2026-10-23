@@ -100,13 +100,14 @@ func (j *jog) tick() {
 		return
 	}
 
+	lookaheadSec := j.lookahead.Seconds()
 	delta := poseDeltaStep{
-		X:  vel[0] * j.transPerSec * j.lookaheadSec,
-		Y:  vel[1] * j.transPerSec * j.lookaheadSec,
-		Z:  vel[2] * j.transPerSec * j.lookaheadSec,
-		RX: vel[3] * j.rotPerSec * j.lookaheadSec,
-		RY: vel[4] * j.rotPerSec * j.lookaheadSec,
-		RZ: vel[5] * j.rotPerSec * j.lookaheadSec,
+		X:  vel[0] * j.transPerSec * lookaheadSec,
+		Y:  vel[1] * j.transPerSec * lookaheadSec,
+		Z:  vel[2] * j.transPerSec * lookaheadSec,
+		RX: vel[3] * j.rotPerSec * lookaheadSec,
+		RY: vel[4] * j.rotPerSec * lookaheadSec,
+		RZ: vel[5] * j.rotPerSec * lookaheadSec,
 	}
 	goal, err := applyDelta(currentPose, delta)
 	if err != nil {

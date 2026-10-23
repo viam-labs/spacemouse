@@ -102,7 +102,7 @@ type jog struct {
 	transPerSec    float64
 	rotPerSec      float64
 	tickInterval   time.Duration
-	lookaheadSec   float64
+	lookahead      time.Duration
 	posDeadbandMM  float64
 	rotDeadbandDeg float64
 	errorCooldown  time.Duration
@@ -162,7 +162,7 @@ func newJog(
 		transPerSec:    firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
 		rotPerSec:      firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
 		tickInterval:   tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
-		lookaheadSec:   firstNonNil(cfg.LookaheadMs, defaultLookaheadMs) / 1000,
+		lookahead:      time.Duration(firstNonNil(cfg.LookaheadMs, defaultLookaheadMs)) * time.Millisecond,
 		posDeadbandMM:  firstNonNil(cfg.PosDeadbandMM, defaultPosDeadbandMM),
 		rotDeadbandDeg: firstNonNil(cfg.RotDeadbandDeg, defaultRotDeadbandDeg),
 		errorCooldown:  time.Duration(firstNonNil(cfg.ErrorCooldownMs, defaultErrorCooldownMs)) * time.Millisecond,
@@ -188,7 +188,7 @@ func newJog(
 		"input_controller", cfg.InputName,
 		"motion", motionName,
 		"tick_interval_ms", j.tickInterval.Milliseconds(),
-		"lookahead_ms", j.lookaheadSec*1000,
+		"lookahead_ms", j.lookahead.Milliseconds(),
 		"pos_deadband_mm", j.posDeadbandMM,
 		"rot_deadband_deg", j.rotDeadbandDeg,
 	)
