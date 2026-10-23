@@ -2,7 +2,6 @@ package jog
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/testutils/inject"
 	"go.viam.com/test"
@@ -26,27 +26,10 @@ func fiftyHz(t *testing.T, deadband float64) *jog {
 		transPerSec:  100.0,
 		rotPerSec:    45.0,
 		tickInterval: 20 * time.Millisecond,
+		lookaheadSec: 0.3,
 		cancelCtx:    ctx,
 		cancelFunc:   cancel,
 	}
-}
-
-func TestPoseDelta_BelowDeadbandIsZero(t *testing.T) {
-	j := fiftyHz(t, 0.1)
-	d := j.poseDelta([6]float64{0.05, -0.09, 0.0, 0.1, -0.05, 0.08}, 0.02)
-	test.That(t, d.allZero(), test.ShouldBeTrue)
-}
-
-func TestPoseDelta_ScalesByRateAndDt(t *testing.T) {
-	j := fiftyHz(t, 0.0)
-	dt := 0.02
-
-	d := j.poseDelta([6]float64{1.0, 0, 0, 0, 0, 0}, dt)
-	test.That(t, d.X, test.ShouldAlmostEqual, 100.0*dt) // 2mm per tick at full stick
-	test.That(t, d.Y, test.ShouldEqual, 0.0)
-
-	d = j.poseDelta([6]float64{0, 0, 0, 0.5, 0, 0}, dt)
-	test.That(t, d.RX, test.ShouldAlmostEqual, 45.0*0.5*dt) // 0.45deg per tick at half
 }
 
 func TestAnyAboveDeadband(t *testing.T) {
@@ -102,49 +85,9 @@ func TestTick_BelowDeadbandSkipsArmCalls(t *testing.T) {
 	j.armRes = a
 
 	j.velocities = [6]float64{0.05, 0.05, 0.05, 0.05, 0.05, 0.05}
-	j.tick(0.02)
+	j.tick()
 
 	test.That(t, endPosCalls, test.ShouldEqual, 0)
-	test.That(t, moveCalls, test.ShouldEqual, 0)
-}
-
-func TestTick_AboveDeadbandMovesArm(t *testing.T) {
-	j := fiftyHz(t, 0.05)
-	a := &inject.Arm{}
-	start := spatialmath.NewPose(r3.Vector{X: 100, Y: 200, Z: 300}, &spatialmath.R4AA{Theta: 0, RX: 1})
-	var moved spatialmath.Pose
-	a.EndPositionFunc = func(context.Context, map[string]interface{}) (spatialmath.Pose, error) {
-		return start, nil
-	}
-	a.MoveToPositionFunc = func(_ context.Context, to spatialmath.Pose, _ map[string]interface{}) error {
-		moved = to
-		return nil
-	}
-	j.armRes = a
-
-	j.velocities = [6]float64{1.0, 0, 0, 0, 0, 0}
-	j.tick(0.02)
-
-	test.That(t, moved, test.ShouldNotBeNil)
-	test.That(t, moved.Point().X, test.ShouldAlmostEqual, 102.0) // +100mm/s * 0.02
-}
-
-func TestTick_EndPositionErrorSkipsMove(t *testing.T) {
-	j := fiftyHz(t, 0.05)
-	a := &inject.Arm{}
-	var moveCalls int
-	a.EndPositionFunc = func(context.Context, map[string]interface{}) (spatialmath.Pose, error) {
-		return nil, errors.New("boom")
-	}
-	a.MoveToPositionFunc = func(context.Context, spatialmath.Pose, map[string]interface{}) error {
-		moveCalls++
-		return nil
-	}
-	j.armRes = a
-
-	j.velocities = [6]float64{1.0, 0, 0, 0, 0, 0}
-	j.tick(0.02)
-
 	test.That(t, moveCalls, test.ShouldEqual, 0)
 }
 
@@ -175,6 +118,55 @@ func TestSubscribe_DisconnectZeroes(t *testing.T) {
 	test.That(t, j.snapshot(), test.ShouldEqual, [6]float64{})
 }
 
+func TestPoseDiffExceeds(t *testing.T) {
+	ori := &spatialmath.R4AA{Theta: 0, RX: 1}
+	a := spatialmath.NewPose(r3.Vector{X: 100, Y: 200, Z: 300}, ori)
+
+	t.Run("identical poses do not exceed", func(t *testing.T) {
+		b := spatialmath.NewPose(r3.Vector{X: 100, Y: 200, Z: 300}, ori)
+		test.That(t, poseDiffExceeds(a, b, 1.0, 1.0), test.ShouldBeFalse)
+	})
+
+	t.Run("sub-mm translation does not exceed 1mm threshold", func(t *testing.T) {
+		b := spatialmath.NewPose(r3.Vector{X: 100.5, Y: 200.5, Z: 300.5}, ori)
+		test.That(t, poseDiffExceeds(a, b, 1.0, 1.0), test.ShouldBeFalse)
+	})
+
+	t.Run("2mm translation exceeds 1mm threshold", func(t *testing.T) {
+		b := spatialmath.NewPose(r3.Vector{X: 102, Y: 200, Z: 300}, ori)
+		test.That(t, poseDiffExceeds(a, b, 1.0, 1.0), test.ShouldBeTrue)
+	})
+
+	t.Run("5-degree rotation exceeds 1-degree threshold", func(t *testing.T) {
+		b := spatialmath.NewPose(r3.Vector{X: 100, Y: 200, Z: 300},
+			&spatialmath.R4AA{Theta: 5 * 3.141592653589793 / 180, RX: 1})
+		test.That(t, poseDiffExceeds(a, b, 1.0, 1.0), test.ShouldBeTrue)
+	})
+
+	t.Run("sub-threshold rotation does not exceed", func(t *testing.T) {
+		b := spatialmath.NewPose(r3.Vector{X: 100, Y: 200, Z: 300},
+			&spatialmath.R4AA{Theta: 0.1 * 3.141592653589793 / 180, RX: 1})
+		test.That(t, poseDiffExceeds(a, b, 1.0, 1.0), test.ShouldBeFalse)
+	})
+}
+
+func TestTick_IdleToIdleIsNoop(t *testing.T) {
+	// When velocity is below deadband and we haven't been moving, tick should
+	// read nothing from the arm and send no commands.
+	j := fiftyHz(t, 0.1)
+	a := &inject.Arm{}
+	var endPosCalls int
+	a.EndPositionFunc = func(context.Context, map[string]interface{}) (spatialmath.Pose, error) {
+		endPosCalls++
+		return nil, nil
+	}
+	j.armRes = a
+	j.velocities = [6]float64{0.05, 0.05, 0.05, 0.05, 0.05, 0.05} // all below 0.1 deadband
+	j.tick()
+	test.That(t, endPosCalls, test.ShouldEqual, 0)
+	test.That(t, j.moving, test.ShouldBeFalse)
+}
+
 func TestTickInterval(t *testing.T) {
 	test.That(t, tickInterval(50), test.ShouldEqual, 20*time.Millisecond)
 	test.That(t, tickInterval(0), test.ShouldEqual, 20*time.Millisecond)     // defaults
@@ -200,6 +192,7 @@ func TestConfigValidate(t *testing.T) {
 	test.That(t, deps, test.ShouldResemble, []string{
 		arm.Named("my-arm").String(),
 		input.Named("my-sm").String(),
+		motion.Named(defaultMotionName).String(),
 	})
 }
 
