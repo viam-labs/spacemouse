@@ -12,3 +12,5 @@ module.tar.gz
 .VIAM_RELOAD_ARCHIVE.tar.gz
 
 coverage.out
+
+.local/

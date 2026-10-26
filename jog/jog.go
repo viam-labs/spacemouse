@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.viam.com/rdk/components/arm"
@@ -13,9 +14,13 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
+	"go.viam.com/rdk/services/motion"
+	"go.viam.com/rdk/spatialmath"
 )
 
-// Model is the registered Viam model for the jog service.
+const referenceFrame = "world"
+
+// Model is the registered Viam model.
 var Model = resource.NewModel("viam", "spacemouse", "jog")
 
 const (
@@ -23,20 +28,31 @@ const (
 	defaultTranslationMMPerSec = 100.0
 	defaultRotationDegPerSec   = 45.0
 	defaultTickHz              = 50.0
+	defaultLookaheadMs         = 300
+	defaultMotionName          = "motion"
+
+	posDeadbandMM  = 1.0
+	rotDeadbandDeg = 1.0
+	commandTimeout = 500 * time.Millisecond
+	errorCooldown  = 1 * time.Second
 )
 
 // Config wires an arm to an input_controller.
 type Config struct {
-	ArmName   string `json:"arm"`
-	InputName string `json:"input_controller"`
+	ArmName    string `json:"arm"`
+	InputName  string `json:"input_controller"`
+	MotionName string `json:"motion,omitempty"`
 
 	Deadband            *float64 `json:"deadband,omitempty"`
 	TranslationMMPerSec *float64 `json:"translation_mm_per_sec,omitempty"`
 	RotationDegPerSec   *float64 `json:"rotation_deg_per_sec,omitempty"`
 	TickHz              *float64 `json:"tick_hz,omitempty"`
+
+	// LookaheadMs is how far into the future each goal pose is placed.
+	LookaheadMs *float64 `json:"lookahead_ms,omitempty"`
 }
 
-// Validate requires both resource names and returns them as implicit deps.
+// Validate returns the deps the service requires.
 func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.ArmName == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
@@ -44,9 +60,14 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if c.InputName == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "input_controller")
 	}
+	motionName := c.MotionName
+	if motionName == "" {
+		motionName = defaultMotionName
+	}
 	return []string{
 		arm.Named(c.ArmName).String(),
 		input.Named(c.InputName).String(),
+		motion.Named(motionName).String(),
 	}, nil, nil
 }
 
@@ -62,16 +83,27 @@ type jog struct {
 	resource.Named
 	resource.AlwaysRebuild
 
-	logger logging.Logger
-	armRes arm.Arm
+	logger    logging.Logger
+	arm       arm.Arm
+	armName   string
+	motionSvc motion.Service
 
 	deadband     float64
 	transPerSec  float64
 	rotPerSec    float64
 	tickInterval time.Duration
+	lookahead    time.Duration
 
 	velMu      sync.RWMutex
 	velocities [6]float64
+
+	// movePending gates a single in-flight goal send; ticks drop otherwise.
+	movePending atomic.Bool
+
+	moveMu       sync.Mutex
+	moving       bool
+	lastSentPose spatialmath.Pose
+	errorUntil   time.Time
 
 	cancelCtx  context.Context
 	cancelFunc context.CancelFunc
@@ -97,16 +129,27 @@ func newJog(
 	if err != nil {
 		return nil, fmt.Errorf("input_controller %q not found: %w", cfg.InputName, err)
 	}
+	motionName := cfg.MotionName
+	if motionName == "" {
+		motionName = defaultMotionName
+	}
+	motionSvc, err := motion.FromProvider(deps, motionName)
+	if err != nil {
+		return nil, fmt.Errorf("motion service %q not found: %w", motionName, err)
+	}
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	j := &jog{
 		Named:        conf.ResourceName().AsNamed(),
 		logger:       logger,
-		armRes:       armRes,
+		arm:          armRes,
+		armName:      cfg.ArmName,
+		motionSvc:    motionSvc,
 		deadband:     firstNonNil(cfg.Deadband, defaultDeadband),
 		transPerSec:  firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
 		rotPerSec:    firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
 		tickInterval: tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
+		lookahead:    time.Duration(firstNonNil(cfg.LookaheadMs, defaultLookaheadMs)) * time.Millisecond,
 		cancelCtx:    cancelCtx,
 		cancelFunc:   cancelFunc,
 	}
@@ -116,18 +159,66 @@ func newJog(
 		return nil, fmt.Errorf("subscribe to input_controller: %w", err)
 	}
 
+	if err := j.openPipeline(ctx); err != nil {
+		cancelFunc()
+		return nil, fmt.Errorf("open pipeline: %w", err)
+	}
+
 	j.wg.Add(1)
 	go j.drainLoop()
 
 	logger.CInfow(ctx, "jog service started",
 		"arm", cfg.ArmName,
 		"input_controller", cfg.InputName,
+		"motion", motionName,
 		"tick_interval_ms", j.tickInterval.Milliseconds(),
-		"translation_mm_per_sec", j.transPerSec,
-		"rotation_deg_per_sec", j.rotPerSec,
-		"deadband", j.deadband,
+		"lookahead_ms", j.lookahead.Milliseconds(),
 	)
 	return j, nil
+}
+
+func poseInFrameJSON(pose spatialmath.Pose) string {
+	pt := pose.Point()
+	ov := pose.Orientation().OrientationVectorDegrees()
+	return fmt.Sprintf(
+		`{"reference_frame":"%s","pose":{"x":%f,"y":%f,"z":%f,"o_x":%f,"o_y":%f,"o_z":%f,"theta":%f}}`,
+		referenceFrame, pt.X, pt.Y, pt.Z, ov.OX, ov.OY, ov.OZ, ov.Theta,
+	)
+}
+
+func (j *jog) openPipeline(ctx context.Context) error {
+	currentPose, err := j.arm.EndPosition(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("read current pose: %w", err)
+	}
+	startReq := fmt.Sprintf(
+		`{"name":"builtin","component_name":"%s","destination":%s}`,
+		j.armName, poseInFrameJSON(currentPose),
+	)
+	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	_, err = j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
+		"teleop_start": startReq,
+	})
+	return err
+}
+
+func (j *jog) sendGoal(ctx context.Context, pose spatialmath.Pose) error {
+	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	_, err := j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
+		"teleop_move":    poseInFrameJSON(pose),
+		"component_name": j.armName,
+	})
+	return err
+}
+
+func (j *jog) closePipeline(ctx context.Context) {
+	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	if _, err := j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{"teleop_stop": ""}); err != nil {
+		j.logger.CWarnw(cmdCtx, "close pipeline failed", "err", err)
+	}
 }
 
 // DoCommand exposes current velocities so operators can sanity-check the input path.
@@ -146,9 +237,10 @@ func (j *jog) DoCommand(_ context.Context, _ map[string]interface{}) (map[string
 	}, nil
 }
 
-func (j *jog) Close(_ context.Context) error {
+func (j *jog) Close(ctx context.Context) error {
 	j.cancelFunc()
 	j.wg.Wait()
+	j.closePipeline(ctx)
 	return nil
 }
 
