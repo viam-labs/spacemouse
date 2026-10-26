@@ -26,7 +26,6 @@ func fiftyHz(t *testing.T, deadband float64) *jog {
 		transPerSec:  100.0,
 		rotPerSec:    45.0,
 		tickInterval: 20 * time.Millisecond,
-		lookahead:    300 * time.Millisecond,
 		cancelCtx:    ctx,
 		cancelFunc:   cancel,
 	}

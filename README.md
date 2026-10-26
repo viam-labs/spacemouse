@@ -39,7 +39,11 @@ having to run `lsusb`.
 ### `viam:spacemouse:jog` (generic service)
 
 Jogs an arm's end effector from a 6-axis input_controller via the motion
-service's teleop pipeline. See [TELEOP.md](TELEOP.md) for config and tuning.
+service's teleop pipeline. TCP speed is bounded directly by
+`translation_mm_per_sec` and `rotation_deg_per_sec`.
+
+See [TELEOP.md](TELEOP.md) for config, tuning, and a speed-knob table
+(careful alignment vs. general vs. rapid repositioning).
 
 ## Host setup
 

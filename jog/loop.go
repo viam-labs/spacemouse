@@ -3,9 +3,11 @@ package jog
 import (
 	"context"
 	"math"
+	"strings"
 	"time"
 
 	"go.viam.com/rdk/components/input"
+	"go.viam.com/rdk/referenceframe"
 )
 
 var axisControls = [6]input.Control{
@@ -67,11 +69,11 @@ func (j *jog) tick() {
 	above := j.anyAxisAboveDeadband(vel)
 
 	if !above {
-		// On the moving→idle edge, pin the arm's current pose so the pipeline
-		// decelerates to a stop. Then stay quiet until the user pushes again.
+		// Clear virtualGoal on every idle tick so a stale goal can't carry over.
 		j.moveMu.Lock()
 		wasMoving := j.moving
 		j.moving = false
+		j.virtualGoal = nil
 		j.moveMu.Unlock()
 		if !wasMoving {
 			return
@@ -97,24 +99,60 @@ func (j *jog) tick() {
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed", "err", err)
 		return
 	}
-
-	lookaheadSec := j.lookahead.Seconds()
-	delta := poseDeltaStep{
-		X:  vel[0] * j.transPerSec * lookaheadSec,
-		Y:  vel[1] * j.transPerSec * lookaheadSec,
-		Z:  vel[2] * j.transPerSec * lookaheadSec,
-		RX: vel[3] * j.rotPerSec * lookaheadSec,
-		RY: vel[4] * j.rotPerSec * lookaheadSec,
-		RZ: vel[5] * j.rotPerSec * lookaheadSec,
+	currentInputs, err := j.arm.CurrentInputs(j.cancelCtx)
+	if err != nil {
+		j.movePending.Store(false)
+		j.logger.CWarnw(j.cancelCtx, "arm CurrentInputs failed", "err", err)
+		return
 	}
-	goal, err := applyDelta(currentPose, delta)
+
+	j.moveMu.Lock()
+	base := j.virtualGoal
+	j.moveMu.Unlock()
+	if base == nil {
+		base = currentPose
+	}
+
+	dtSec := j.tickInterval.Seconds()
+	delta := poseDeltaStep{
+		X:  vel[0] * j.transPerSec * dtSec,
+		Y:  vel[1] * j.transPerSec * dtSec,
+		Z:  vel[2] * j.transPerSec * dtSec,
+		RX: vel[3] * j.rotPerSec * dtSec,
+		RY: vel[4] * j.rotPerSec * dtSec,
+		RZ: vel[5] * j.rotPerSec * dtSec,
+	}
+
+	// Scale translation and rotation independently against max_joint_vel so a
+	// wrist singularity doesn't choke translation. When scaled, reset base to
+	// currentPose so goal doesn't drift ahead in joint space.
+	scaleT, scaleR, maxJointTrans, maxJointRot := j.scaleForJointLimitSplit(currentInputs, delta, dtSec)
+	if scaleT < 1.0 || scaleR < 1.0 {
+		j.logger.CInfof(j.cancelCtx,
+			"jacobian scale_t=%.3f scale_r=%.3f joint_trans=%.3frad joint_rot=%.3frad budget=%.3frad inputs=%v",
+			scaleT, scaleR, maxJointTrans, maxJointRot, j.maxJointVelRads*dtSec, inputsAsSlice(currentInputs))
+		delta.X *= scaleT
+		delta.Y *= scaleT
+		delta.Z *= scaleT
+		delta.RX *= scaleR
+		delta.RY *= scaleR
+		delta.RZ *= scaleR
+		base = currentPose
+	}
+
+	goal, err := applyDelta(base, delta)
 	if err != nil {
 		j.movePending.Store(false)
 		j.logger.CWarnw(j.cancelCtx, "pose composition failed", "err", err)
 		return
 	}
 
+	if poseDiffExceeds(currentPose, goal, maxLagMM, maxLagDeg) {
+		goal = currentPose
+	}
+
 	j.moveMu.Lock()
+	j.virtualGoal = goal
 	lastSent := j.lastSentPose
 	j.moveMu.Unlock()
 	if lastSent != nil && !poseDiffExceeds(lastSent, goal, posDeadbandMM, rotDeadbandDeg) {
@@ -129,6 +167,17 @@ func (j *jog) tick() {
 	go func() {
 		defer j.movePending.Store(false)
 		if err := j.sendGoal(j.cancelCtx, goal); err != nil {
+			// Motion service drops the teleop pipeline on any reconfigure (RDK quirk).
+			// Re-open and let the next tick retry.
+			if strings.Contains(err.Error(), "not running") {
+				if openErr := j.openPipeline(j.cancelCtx); openErr != nil {
+					j.logger.CWarnw(j.cancelCtx, "pipeline re-open failed", "err", openErr)
+					j.moveMu.Lock()
+					j.errorUntil = time.Now().Add(errorCooldown)
+					j.moveMu.Unlock()
+				}
+				return
+			}
 			j.logger.CWarnw(j.cancelCtx, "send goal failed", "err", err)
 			j.moveMu.Lock()
 			j.errorUntil = time.Now().Add(errorCooldown)
@@ -142,10 +191,23 @@ func (j *jog) tick() {
 }
 
 func (j *jog) parkArm() {
-	if !j.movePending.CompareAndSwap(false, true) {
-		return
+	// Park must always fire; drain in-flight so arm doesn't chase a stale goal.
+	deadline := time.Now().Add(parkDrainTimeout)
+	for !j.movePending.CompareAndSwap(false, true) {
+		if time.Now().After(deadline) {
+			j.logger.CWarn(j.cancelCtx, "park: in-flight send did not drain; sending anyway")
+			break
+		}
+		time.Sleep(parkDrainPoll)
 	}
 	defer j.movePending.Store(false)
+
+	defer func() {
+		j.moveMu.Lock()
+		j.virtualGoal = nil
+		j.moveMu.Unlock()
+	}()
+
 	pose, err := j.arm.EndPosition(j.cancelCtx, nil)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed on park", "err", err)
@@ -173,4 +235,51 @@ func (j *jog) anyAxisAboveDeadband(vel [6]float64) bool {
 		}
 	}
 	return false
+}
+
+// scaleForJointLimitSplit returns (scaleTrans, scaleRot, maxJointTrans,
+// maxJointRot). Translation and rotation are scaled independently so a
+// singularity in one axis doesn't choke the other. Both scales are 1.0 if
+// Jacobian/DLS fails.
+func (j *jog) scaleForJointLimitSplit(inputs []referenceframe.Input, d poseDeltaStep, dtSec float64) (float64, float64, float64, float64) {
+	J, err := jacobianAt(j.kinematic, inputs)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "jacobian compute failed", "err", err)
+		return 1.0, 1.0, 0, 0
+	}
+	transTCP := []float64{d.X, d.Y, d.Z, 0, 0, 0}
+	rotTCP := []float64{0, 0, 0,
+		d.RX * math.Pi / 180, d.RY * math.Pi / 180, d.RZ * math.Pi / 180}
+
+	jointTrans, err := solveDLS(J, transTCP, dlsLambda)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "DLS solve failed (trans)", "err", err)
+		return 1.0, 1.0, 0, 0
+	}
+	jointRot, err := solveDLS(J, rotTCP, dlsLambda)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "DLS solve failed (rot)", "err", err)
+		return 1.0, 1.0, 0, 0
+	}
+	return jointVelScale(jointTrans, j.maxJointVelRads, dtSec),
+		jointVelScale(jointRot, j.maxJointVelRads, dtSec),
+		maxAbs(jointTrans), maxAbs(jointRot)
+}
+
+func maxAbs(xs []float64) float64 {
+	m := 0.0
+	for _, x := range xs {
+		if a := math.Abs(x); a > m {
+			m = a
+		}
+	}
+	return m
+}
+
+func inputsAsSlice(inputs []referenceframe.Input) []float64 {
+	out := make([]float64, len(inputs))
+	for i, in := range inputs {
+		out[i] = float64(in)
+	}
+	return out
 }
