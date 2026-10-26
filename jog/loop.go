@@ -129,7 +129,10 @@ func (j *jog) tick() {
 	// singularities, where small TCP motion requires huge joint motion), scale
 	// the TCP delta down proportionally. The arm never gets a goal that would
 	// make it whip joints past the configured limit.
-	if scale := j.scaleForJointLimit(currentInputs, delta, dtSec); scale < 1.0 {
+	scale, maxJointDeltaRad := j.scaleForJointLimit(currentInputs, delta, dtSec)
+	if scale < 1.0 {
+		j.logger.CInfof(j.cancelCtx, "jacobian scale=%.3f max_joint_delta=%.3frad budget=%.3frad inputs=%v",
+			scale, maxJointDeltaRad, j.maxJointVelRads*dtSec, inputsAsSlice(currentInputs))
 		delta.X *= scale
 		delta.Y *= scale
 		delta.Z *= scale
@@ -240,13 +243,14 @@ func (j *jog) anyAxisAboveDeadband(vel [6]float64) bool {
 }
 
 // scaleForJointLimit returns a factor in [0,1] that scales the TCP delta so no
-// joint would exceed maxJointVelRads × dt. Returns 1.0 if under the limit or if
-// the Jacobian/DLS calculation fails (we log and don't gate on it).
-func (j *jog) scaleForJointLimit(inputs []referenceframe.Input, d poseDeltaStep, dtSec float64) float64 {
+// joint would exceed maxJointVelRads × dt. Second return is the predicted
+// max absolute joint delta in radians (for logging). Returns (1.0, 0) if under
+// the limit or if the Jacobian/DLS calculation fails (we log and don't gate on it).
+func (j *jog) scaleForJointLimit(inputs []referenceframe.Input, d poseDeltaStep, dtSec float64) (float64, float64) {
 	J, err := jacobianAt(j.kinematic, inputs)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "jacobian compute failed", "err", err)
-		return 1.0
+		return 1.0, 0
 	}
 	tcpDelta := []float64{
 		d.X, d.Y, d.Z,
@@ -255,7 +259,21 @@ func (j *jog) scaleForJointLimit(inputs []referenceframe.Input, d poseDeltaStep,
 	jointDelta, err := solveDLS(J, tcpDelta, dlsLambda)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "DLS solve failed", "err", err)
-		return 1.0
+		return 1.0, 0
 	}
-	return jointVelScale(jointDelta, j.maxJointVelRads, dtSec)
+	maxAbs := 0.0
+	for _, d := range jointDelta {
+		if a := math.Abs(d); a > maxAbs {
+			maxAbs = a
+		}
+	}
+	return jointVelScale(jointDelta, j.maxJointVelRads, dtSec), maxAbs
+}
+
+func inputsAsSlice(inputs []referenceframe.Input) []float64 {
+	out := make([]float64, len(inputs))
+	for i, in := range inputs {
+		out[i] = float64(in)
+	}
+	return out
 }
