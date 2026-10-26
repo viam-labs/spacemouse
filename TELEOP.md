@@ -46,6 +46,8 @@ of blowing up.
 | `arm` *(required)*        | —          | Arm resource name.                                                       |
 | `input_controller` *(req)*| —          | Input controller resource name.                                          |
 | `motion`                  | `"motion"` | Name of the motion service.                                              |
+| `gripper`                 | —          | Optional gripper resource name. Toggled by `gripper_button`.             |
+| `gripper_button`          | `"ButtonMenu"` | Button Control that toggles the gripper on `ButtonPress`.            |
 | `deadband`                | `0.05`     | Minimum axis magnitude to register.                                      |
 | `translation_mm_per_sec`  | `150`      | TCP speed at full stick, in mm/s. Direct cap.                            |
 | `rotation_deg_per_sec`    | `30`       | TCP rotation speed at full stick, in deg/s. Direct cap.                  |

@@ -2,6 +2,7 @@ package jog
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -46,7 +47,30 @@ func (j *jog) subscribe(ctx context.Context, ctrl input.Controller) error {
 			return err
 		}
 	}
+
+	if j.gripper != nil {
+		if err := ctrl.RegisterControlCallback(ctx, j.gripperButton,
+			[]input.EventType{input.ButtonPress}, j.toggleGripper, nil); err != nil {
+			return fmt.Errorf("register gripper button %q: %w", j.gripperButton, err)
+		}
+	}
 	return nil
+}
+
+func (j *jog) toggleGripper(ctx context.Context, _ input.Event) {
+	opening := !j.gripperOpen.Load()
+	if opening {
+		if err := j.gripper.Open(ctx, nil); err != nil {
+			j.logger.CWarnw(ctx, "gripper open failed", "err", err)
+			return
+		}
+	} else {
+		if _, err := j.gripper.Grab(ctx, nil); err != nil {
+			j.logger.CWarnw(ctx, "gripper grab failed", "err", err)
+			return
+		}
+	}
+	j.gripperOpen.Store(opening)
 }
 
 func (j *jog) drainLoop() {
