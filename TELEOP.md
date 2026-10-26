@@ -35,8 +35,8 @@ of blowing up.
   "attributes": {
     "arm": "my-arm",
     "input_controller": "my-spacemouse",
-    "translation_mm_per_sec": 100,
-    "rotation_deg_per_sec": 45
+    "translation_mm_per_sec": 150,
+    "rotation_deg_per_sec": 30
   }
 }
 ```
@@ -47,18 +47,18 @@ of blowing up.
 | `input_controller` *(req)*| —          | Input controller resource name.                                          |
 | `motion`                  | `"motion"` | Name of the motion service.                                              |
 | `deadband`                | `0.05`     | Minimum axis magnitude to register.                                      |
-| `translation_mm_per_sec`  | `100`      | TCP speed at full stick, in mm/s. Direct cap.                            |
-| `rotation_deg_per_sec`    | `45`       | TCP rotation speed at full stick, in deg/s. Direct cap.                  |
-| `max_joint_vel_degs_per_sec` | `60`    | Per-joint velocity cap enforced via Jacobian scaling. Prevents whipping near singularities. |
+| `translation_mm_per_sec`  | `150`      | TCP speed at full stick, in mm/s. Direct cap.                            |
+| `rotation_deg_per_sec`    | `30`       | TCP rotation speed at full stick, in deg/s. Direct cap.                  |
+| `max_joint_vel_degs_per_sec` | `90`    | Per-joint velocity cap enforced via Jacobian scaling. Prevents whipping near singularities. |
 | `tick_hz`                 | `50`       | Drain loop rate.                                                         |
 
 ## Speed guide
 
 | use case              | `translation_mm_per_sec` | `rotation_deg_per_sec` |
 |-----------------------|--------------------------|------------------------|
-| careful alignment     | `25`–`50`                | `10`–`20`              |
-| general teleop        | `100`                    | `45`                   |
-| rapid repositioning   | `200`–`300`              | `90`                   |
+| careful alignment     | `25`–`75`                | `10`–`20`              |
+| general teleop        | `150`                    | `30`                   |
+| rapid repositioning   | `250`–`400`              | `60`                   |
 
 Both knobs are hard caps on the virtual goal's advance rate — the actual arm
 tracks the goal, so TCP speed matches what you configure (bounded by the
