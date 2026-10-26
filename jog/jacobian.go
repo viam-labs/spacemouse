@@ -16,10 +16,11 @@ const (
 	// float noise.
 	jacobianPerturbation = 1e-5
 
-	// dlsLambda damps the pseudo-inverse near singularities. Trades joint
-	// velocity accuracy for stability. Standard value from the robotics
-	// literature; tune if needed.
-	dlsLambda = 0.01
+	// dlsLambda damps the pseudo-inverse near singularities. Higher = smoother
+	// behavior near singularity (less twitchy scaling), at the cost of some
+	// accuracy in the joint-velocity prediction. 0.1 is a well-tested middle
+	// ground for 6-DoF arms.
+	dlsLambda = 0.1
 )
 
 // jacobianAt computes a 6×DoF numerical Jacobian at `inputs`. Rows are the
