@@ -127,8 +127,9 @@ func (j *jog) tick() {
 	// Project the TCP delta into joint-space via the Jacobian at the current
 	// config. If any joint would exceed its velocity cap (common near
 	// singularities, where small TCP motion requires huge joint motion), scale
-	// the TCP delta down proportionally. The arm never gets a goal that would
-	// make it whip joints past the configured limit.
+	// the TCP delta down proportionally and base the goal on arm's actual pose
+	// instead of accumulating virtualGoal — otherwise the goal keeps drifting
+	// ahead in joint space even as we scale per-tick deltas.
 	scale, maxJointDeltaRad := j.scaleForJointLimit(currentInputs, delta, dtSec)
 	if scale < 1.0 {
 		j.logger.CInfof(j.cancelCtx, "jacobian scale=%.3f max_joint_delta=%.3frad budget=%.3frad inputs=%v",
@@ -139,6 +140,7 @@ func (j *jog) tick() {
 		delta.RX *= scale
 		delta.RY *= scale
 		delta.RZ *= scale
+		base = currentPose
 	}
 
 	goal, err := applyDelta(base, delta)
