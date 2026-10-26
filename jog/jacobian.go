@@ -11,15 +11,9 @@ import (
 )
 
 const (
-	// jacobianPerturbation is the joint-angle step (rad) used for the numerical
-	// Jacobian. Small enough for linear approximation, large enough to avoid
-	// float noise.
+	// Joint-angle step for the numerical Jacobian.
 	jacobianPerturbation = 1e-5
-
-	// dlsLambda damps the pseudo-inverse near singularities. Higher = smoother
-	// behavior near singularity (less twitchy scaling), at the cost of some
-	// accuracy in the joint-velocity prediction. 0.1 is a well-tested middle
-	// ground for 6-DoF arms.
+	// DLS damping; higher = smoother near singularity, less accurate prediction.
 	dlsLambda = 0.1
 )
 

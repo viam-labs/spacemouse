@@ -27,10 +27,10 @@ var Model = resource.NewModel("viam", "spacemouse", "jog")
 
 const (
 	defaultDeadband              = 0.05
-	defaultTranslationMMPerSec   = 100.0
-	defaultRotationDegPerSec     = 45.0
+	defaultTranslationMMPerSec   = 150.0
+	defaultRotationDegPerSec     = 30.0
 	defaultTickHz                = 50.0
-	defaultMaxJointVelDegsPerSec = 30.0
+	defaultMaxJointVelDegsPerSec = 90.0
 	defaultMotionName            = "motion"
 
 	posDeadbandMM  = 1.0
@@ -38,9 +38,7 @@ const (
 	commandTimeout = 500 * time.Millisecond
 	errorCooldown  = 1 * time.Second
 
-	// Safety: cap how far the virtual goal may run ahead of the arm. If the arm
-	// cannot keep up (speed cap configured above arm capability), goal is snapped
-	// back toward actual so release-to-stop stays within these bounds.
+	// Cap virtual-goal lag so release-to-stop stays within these bounds.
 	maxLagMM  = 50.0
 	maxLagDeg = 20.0
 
@@ -114,8 +112,8 @@ type jog struct {
 	moving       bool
 	lastSentPose spatialmath.Pose
 	errorUntil   time.Time
-	// virtualGoal advances at translation_mm_per_sec regardless of arm position.
-	// Nil when idle; initialized from arm.EndPosition on the next active tick.
+	// virtualGoal advances at translation_mm_per_sec regardless of arm position;
+	// nil when idle, re-initialized from arm pose on next active tick.
 	virtualGoal spatialmath.Pose
 
 	cancelCtx  context.Context

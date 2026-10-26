@@ -69,8 +69,7 @@ func (j *jog) tick() {
 	above := j.anyAxisAboveDeadband(vel)
 
 	if !above {
-		// Clear virtualGoal on every idle tick so a stale goal from a dropped
-		// send or failed park can never carry over.
+		// Clear virtualGoal on every idle tick so a stale goal can't carry over.
 		j.moveMu.Lock()
 		wasMoving := j.moving
 		j.moving = false
@@ -124,12 +123,9 @@ func (j *jog) tick() {
 		RZ: vel[5] * j.rotPerSec * dtSec,
 	}
 
-	// Project the TCP delta into joint-space via the Jacobian at the current
-	// config. Scale translation and rotation independently so a wrist
-	// singularity (which would require huge joint motion for small orientation
-	// changes) doesn't throttle translation too. When either scales down, we
-	// also reset base to currentPose so the goal doesn't drift ahead in joint
-	// space while per-tick deltas get clipped.
+	// Scale translation and rotation independently against max_joint_vel so a
+	// wrist singularity doesn't choke translation. When scaled, reset base to
+	// currentPose so goal doesn't drift ahead in joint space.
 	scaleT, scaleR, maxJointTrans, maxJointRot := j.scaleForJointLimitSplit(currentInputs, delta, dtSec)
 	if scaleT < 1.0 || scaleR < 1.0 {
 		j.logger.CInfof(j.cancelCtx,
@@ -151,8 +147,6 @@ func (j *jog) tick() {
 		return
 	}
 
-	// Clamp how far the virtual goal may run ahead of the arm. If arm can't
-	// keep up with the configured speed, goal snaps back toward actual.
 	if poseDiffExceeds(currentPose, goal, maxLagMM, maxLagDeg) {
 		goal = currentPose
 	}
@@ -173,8 +167,8 @@ func (j *jog) tick() {
 	go func() {
 		defer j.movePending.Store(false)
 		if err := j.sendGoal(j.cancelCtx, goal); err != nil {
-			// Motion service drops the teleop pipeline on any reconfigure (RDK quirk,
-			// see services/motion/builtin/builtin.go). Re-open and let the next tick retry.
+			// Motion service drops the teleop pipeline on any reconfigure (RDK quirk).
+			// Re-open and let the next tick retry.
 			if strings.Contains(err.Error(), "not running") {
 				if openErr := j.openPipeline(j.cancelCtx); openErr != nil {
 					j.logger.CWarnw(j.cancelCtx, "pipeline re-open failed", "err", openErr)
@@ -197,9 +191,7 @@ func (j *jog) tick() {
 }
 
 func (j *jog) parkArm() {
-	// Park is safety-critical: must always fire. Wait for any in-flight send to
-	// drain so we don't race it (and have the arm chase a stale goal set by the
-	// in-flight send after we park).
+	// Park must always fire; drain in-flight so arm doesn't chase a stale goal.
 	deadline := time.Now().Add(parkDrainTimeout)
 	for !j.movePending.CompareAndSwap(false, true) {
 		if time.Now().After(deadline) {
