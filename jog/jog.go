@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/referenceframe"
@@ -32,6 +33,7 @@ const (
 	defaultTickHz                = 50.0
 	defaultMaxJointVelDegsPerSec = 90.0
 	defaultMotionName            = "motion"
+	defaultGripperButton         = "ButtonMenu"
 
 	posDeadbandMM  = 1.0
 	rotDeadbandDeg = 1.0
@@ -52,6 +54,10 @@ type Config struct {
 	InputName  string `json:"input_controller"`
 	MotionName string `json:"motion,omitempty"`
 
+	// Optional gripper toggled by button press (defaults to ButtonMenu).
+	GripperName   string `json:"gripper,omitempty"`
+	GripperButton string `json:"gripper_button,omitempty"`
+
 	Deadband              *float64 `json:"deadband,omitempty"`
 	TranslationMMPerSec   *float64 `json:"translation_mm_per_sec,omitempty"`
 	RotationDegPerSec     *float64 `json:"rotation_deg_per_sec,omitempty"`
@@ -71,11 +77,15 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	if motionName == "" {
 		motionName = defaultMotionName
 	}
-	return []string{
+	deps := []string{
 		arm.Named(c.ArmName).String(),
 		input.Named(c.InputName).String(),
 		motion.Named(motionName).String(),
-	}, nil, nil
+	}
+	if c.GripperName != "" {
+		deps = append(deps, gripper.Named(c.GripperName).String())
+	}
+	return deps, nil, nil
 }
 
 func init() {
@@ -95,6 +105,11 @@ type jog struct {
 	armName   string
 	motionSvc motion.Service
 	kinematic referenceframe.Model
+
+	// Optional gripper + the button Control that toggles it.
+	gripper       gripper.Gripper
+	gripperButton input.Control
+	gripperOpen   atomic.Bool
 
 	deadband        float64
 	transPerSec     float64
@@ -154,6 +169,18 @@ func newJog(
 		return nil, fmt.Errorf("fetch arm kinematics: %w", err)
 	}
 
+	var gripperRes gripper.Gripper
+	if cfg.GripperName != "" {
+		gripperRes, err = gripper.FromProvider(deps, cfg.GripperName)
+		if err != nil {
+			return nil, fmt.Errorf("gripper %q not found: %w", cfg.GripperName, err)
+		}
+	}
+	gripperButton := cfg.GripperButton
+	if gripperButton == "" {
+		gripperButton = defaultGripperButton
+	}
+
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	j := &jog{
 		Named:           conf.ResourceName().AsNamed(),
@@ -162,6 +189,8 @@ func newJog(
 		armName:         cfg.ArmName,
 		motionSvc:       motionSvc,
 		kinematic:       kinematic,
+		gripper:         gripperRes,
+		gripperButton:   input.Control(gripperButton),
 		deadband:        firstNonNil(cfg.Deadband, defaultDeadband),
 		transPerSec:     firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
 		rotPerSec:       firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
