@@ -248,8 +248,10 @@ func (j *jog) scaleForJointLimitSplit(inputs []referenceframe.Input, d poseDelta
 		return 1.0, 1.0, 0, 0
 	}
 	transTCP := []float64{d.X, d.Y, d.Z, 0, 0, 0}
-	rotTCP := []float64{0, 0, 0,
-		d.RX * math.Pi / 180, d.RY * math.Pi / 180, d.RZ * math.Pi / 180}
+	rotTCP := []float64{
+		0, 0, 0,
+		d.RX * math.Pi / 180, d.RY * math.Pi / 180, d.RZ * math.Pi / 180,
+	}
 
 	jointTrans, err := solveDLS(J, transTCP, dlsLambda)
 	if err != nil {
