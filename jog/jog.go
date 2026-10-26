@@ -30,7 +30,7 @@ const (
 	defaultTranslationMMPerSec   = 100.0
 	defaultRotationDegPerSec     = 45.0
 	defaultTickHz                = 50.0
-	defaultMaxJointVelDegsPerSec = 30.0
+	defaultMaxJointVelDegsPerSec = 15.0
 	defaultMotionName            = "motion"
 
 	posDeadbandMM  = 1.0
