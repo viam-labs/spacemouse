@@ -3,9 +3,11 @@ package jog
 import (
 	"context"
 	"math"
+	"strings"
 	"time"
 
 	"go.viam.com/rdk/components/input"
+	"go.viam.com/rdk/referenceframe"
 )
 
 var axisControls = [6]input.Control{
@@ -67,11 +69,12 @@ func (j *jog) tick() {
 	above := j.anyAxisAboveDeadband(vel)
 
 	if !above {
-		// On the moving→idle edge, pin the arm's current pose so the pipeline
-		// decelerates to a stop. Then stay quiet until the user pushes again.
+		// Clear virtualGoal on every idle tick so a stale goal from a dropped
+		// send or failed park can never carry over.
 		j.moveMu.Lock()
 		wasMoving := j.moving
 		j.moving = false
+		j.virtualGoal = nil
 		j.moveMu.Unlock()
 		if !wasMoving {
 			return
@@ -97,24 +100,59 @@ func (j *jog) tick() {
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed", "err", err)
 		return
 	}
-
-	lookaheadSec := j.lookahead.Seconds()
-	delta := poseDeltaStep{
-		X:  vel[0] * j.transPerSec * lookaheadSec,
-		Y:  vel[1] * j.transPerSec * lookaheadSec,
-		Z:  vel[2] * j.transPerSec * lookaheadSec,
-		RX: vel[3] * j.rotPerSec * lookaheadSec,
-		RY: vel[4] * j.rotPerSec * lookaheadSec,
-		RZ: vel[5] * j.rotPerSec * lookaheadSec,
+	currentInputs, err := j.arm.CurrentInputs(j.cancelCtx)
+	if err != nil {
+		j.movePending.Store(false)
+		j.logger.CWarnw(j.cancelCtx, "arm CurrentInputs failed", "err", err)
+		return
 	}
-	goal, err := applyDelta(currentPose, delta)
+
+	j.moveMu.Lock()
+	base := j.virtualGoal
+	j.moveMu.Unlock()
+	if base == nil {
+		base = currentPose
+	}
+
+	dtSec := j.tickInterval.Seconds()
+	delta := poseDeltaStep{
+		X:  vel[0] * j.transPerSec * dtSec,
+		Y:  vel[1] * j.transPerSec * dtSec,
+		Z:  vel[2] * j.transPerSec * dtSec,
+		RX: vel[3] * j.rotPerSec * dtSec,
+		RY: vel[4] * j.rotPerSec * dtSec,
+		RZ: vel[5] * j.rotPerSec * dtSec,
+	}
+
+	// Project the TCP delta into joint-space via the Jacobian at the current
+	// config. If any joint would exceed its velocity cap (common near
+	// singularities, where small TCP motion requires huge joint motion), scale
+	// the TCP delta down proportionally. The arm never gets a goal that would
+	// make it whip joints past the configured limit.
+	if scale := j.scaleForJointLimit(currentInputs, delta, dtSec); scale < 1.0 {
+		delta.X *= scale
+		delta.Y *= scale
+		delta.Z *= scale
+		delta.RX *= scale
+		delta.RY *= scale
+		delta.RZ *= scale
+	}
+
+	goal, err := applyDelta(base, delta)
 	if err != nil {
 		j.movePending.Store(false)
 		j.logger.CWarnw(j.cancelCtx, "pose composition failed", "err", err)
 		return
 	}
 
+	// Clamp how far the virtual goal may run ahead of the arm. If arm can't
+	// keep up with the configured speed, goal snaps back toward actual.
+	if poseDiffExceeds(currentPose, goal, maxLagMM, maxLagDeg) {
+		goal = currentPose
+	}
+
 	j.moveMu.Lock()
+	j.virtualGoal = goal
 	lastSent := j.lastSentPose
 	j.moveMu.Unlock()
 	if lastSent != nil && !poseDiffExceeds(lastSent, goal, posDeadbandMM, rotDeadbandDeg) {
@@ -129,6 +167,17 @@ func (j *jog) tick() {
 	go func() {
 		defer j.movePending.Store(false)
 		if err := j.sendGoal(j.cancelCtx, goal); err != nil {
+			// Motion service drops the teleop pipeline on any reconfigure (RDK quirk,
+			// see services/motion/builtin/builtin.go). Re-open and let the next tick retry.
+			if strings.Contains(err.Error(), "not running") {
+				if openErr := j.openPipeline(j.cancelCtx); openErr != nil {
+					j.logger.CWarnw(j.cancelCtx, "pipeline re-open failed", "err", openErr)
+					j.moveMu.Lock()
+					j.errorUntil = time.Now().Add(errorCooldown)
+					j.moveMu.Unlock()
+				}
+				return
+			}
 			j.logger.CWarnw(j.cancelCtx, "send goal failed", "err", err)
 			j.moveMu.Lock()
 			j.errorUntil = time.Now().Add(errorCooldown)
@@ -142,10 +191,25 @@ func (j *jog) tick() {
 }
 
 func (j *jog) parkArm() {
-	if !j.movePending.CompareAndSwap(false, true) {
-		return
+	// Park is safety-critical: must always fire. Wait for any in-flight send to
+	// drain so we don't race it (and have the arm chase a stale goal set by the
+	// in-flight send after we park).
+	deadline := time.Now().Add(parkDrainTimeout)
+	for !j.movePending.CompareAndSwap(false, true) {
+		if time.Now().After(deadline) {
+			j.logger.CWarn(j.cancelCtx, "park: in-flight send did not drain; sending anyway")
+			break
+		}
+		time.Sleep(parkDrainPoll)
 	}
 	defer j.movePending.Store(false)
+
+	defer func() {
+		j.moveMu.Lock()
+		j.virtualGoal = nil
+		j.moveMu.Unlock()
+	}()
+
 	pose, err := j.arm.EndPosition(j.cancelCtx, nil)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed on park", "err", err)
@@ -173,4 +237,25 @@ func (j *jog) anyAxisAboveDeadband(vel [6]float64) bool {
 		}
 	}
 	return false
+}
+
+// scaleForJointLimit returns a factor in [0,1] that scales the TCP delta so no
+// joint would exceed maxJointVelRads × dt. Returns 1.0 if under the limit or if
+// the Jacobian/DLS calculation fails (we log and don't gate on it).
+func (j *jog) scaleForJointLimit(inputs []referenceframe.Input, d poseDeltaStep, dtSec float64) float64 {
+	J, err := jacobianAt(j.kinematic, inputs)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "jacobian compute failed", "err", err)
+		return 1.0
+	}
+	tcpDelta := []float64{
+		d.X, d.Y, d.Z,
+		d.RX * math.Pi / 180, d.RY * math.Pi / 180, d.RZ * math.Pi / 180,
+	}
+	jointDelta, err := solveDLS(J, tcpDelta, dlsLambda)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "DLS solve failed", "err", err)
+		return 1.0
+	}
+	return jointVelScale(jointDelta, j.maxJointVelRads, dtSec)
 }

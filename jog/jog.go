@@ -12,10 +12,12 @@ import (
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/input"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/utils"
 )
 
 const referenceFrame = "world"
@@ -24,17 +26,26 @@ const referenceFrame = "world"
 var Model = resource.NewModel("viam", "spacemouse", "jog")
 
 const (
-	defaultDeadband            = 0.05
-	defaultTranslationMMPerSec = 100.0
-	defaultRotationDegPerSec   = 45.0
-	defaultTickHz              = 50.0
-	defaultLookaheadMs         = 300
-	defaultMotionName          = "motion"
+	defaultDeadband              = 0.05
+	defaultTranslationMMPerSec   = 100.0
+	defaultRotationDegPerSec     = 45.0
+	defaultTickHz                = 50.0
+	defaultMaxJointVelDegsPerSec = 60.0
+	defaultMotionName            = "motion"
 
 	posDeadbandMM  = 1.0
 	rotDeadbandDeg = 1.0
 	commandTimeout = 500 * time.Millisecond
 	errorCooldown  = 1 * time.Second
+
+	// Safety: cap how far the virtual goal may run ahead of the arm. If the arm
+	// cannot keep up (speed cap configured above arm capability), goal is snapped
+	// back toward actual so release-to-stop stays within these bounds.
+	maxLagMM  = 50.0
+	maxLagDeg = 20.0
+
+	parkDrainTimeout = 500 * time.Millisecond
+	parkDrainPoll    = 5 * time.Millisecond
 )
 
 // Config wires an arm to an input_controller.
@@ -43,13 +54,11 @@ type Config struct {
 	InputName  string `json:"input_controller"`
 	MotionName string `json:"motion,omitempty"`
 
-	Deadband            *float64 `json:"deadband,omitempty"`
-	TranslationMMPerSec *float64 `json:"translation_mm_per_sec,omitempty"`
-	RotationDegPerSec   *float64 `json:"rotation_deg_per_sec,omitempty"`
-	TickHz              *float64 `json:"tick_hz,omitempty"`
-
-	// LookaheadMs is how far into the future each goal pose is placed.
-	LookaheadMs *float64 `json:"lookahead_ms,omitempty"`
+	Deadband              *float64 `json:"deadband,omitempty"`
+	TranslationMMPerSec   *float64 `json:"translation_mm_per_sec,omitempty"`
+	RotationDegPerSec     *float64 `json:"rotation_deg_per_sec,omitempty"`
+	TickHz                *float64 `json:"tick_hz,omitempty"`
+	MaxJointVelDegsPerSec *float64 `json:"max_joint_vel_degs_per_sec,omitempty"`
 }
 
 // Validate returns the deps the service requires.
@@ -87,12 +96,13 @@ type jog struct {
 	arm       arm.Arm
 	armName   string
 	motionSvc motion.Service
+	kinematic referenceframe.Model
 
-	deadband     float64
-	transPerSec  float64
-	rotPerSec    float64
-	tickInterval time.Duration
-	lookahead    time.Duration
+	deadband        float64
+	transPerSec     float64
+	rotPerSec       float64
+	tickInterval    time.Duration
+	maxJointVelRads float64
 
 	velMu      sync.RWMutex
 	velocities [6]float64
@@ -104,6 +114,9 @@ type jog struct {
 	moving       bool
 	lastSentPose spatialmath.Pose
 	errorUntil   time.Time
+	// virtualGoal advances at translation_mm_per_sec regardless of arm position.
+	// Nil when idle; initialized from arm.EndPosition on the next active tick.
+	virtualGoal spatialmath.Pose
 
 	cancelCtx  context.Context
 	cancelFunc context.CancelFunc
@@ -138,20 +151,26 @@ func newJog(
 		return nil, fmt.Errorf("motion service %q not found: %w", motionName, err)
 	}
 
+	kinematic, err := armRes.Kinematics(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetch arm kinematics: %w", err)
+	}
+
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	j := &jog{
-		Named:        conf.ResourceName().AsNamed(),
-		logger:       logger,
-		arm:          armRes,
-		armName:      cfg.ArmName,
-		motionSvc:    motionSvc,
-		deadband:     firstNonNil(cfg.Deadband, defaultDeadband),
-		transPerSec:  firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
-		rotPerSec:    firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
-		tickInterval: tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
-		lookahead:    time.Duration(firstNonNil(cfg.LookaheadMs, defaultLookaheadMs)) * time.Millisecond,
-		cancelCtx:    cancelCtx,
-		cancelFunc:   cancelFunc,
+		Named:           conf.ResourceName().AsNamed(),
+		logger:          logger,
+		arm:             armRes,
+		armName:         cfg.ArmName,
+		motionSvc:       motionSvc,
+		kinematic:       kinematic,
+		deadband:        firstNonNil(cfg.Deadband, defaultDeadband),
+		transPerSec:     firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
+		rotPerSec:       firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
+		tickInterval:    tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
+		maxJointVelRads: utils.DegToRad(firstNonNil(cfg.MaxJointVelDegsPerSec, defaultMaxJointVelDegsPerSec)),
+		cancelCtx:       cancelCtx,
+		cancelFunc:      cancelFunc,
 	}
 
 	if err := j.subscribe(ctx, inRes); err != nil {
@@ -172,7 +191,8 @@ func newJog(
 		"input_controller", cfg.InputName,
 		"motion", motionName,
 		"tick_interval_ms", j.tickInterval.Milliseconds(),
-		"lookahead_ms", j.lookahead.Milliseconds(),
+		"translation_mm_per_sec", j.transPerSec,
+		"rotation_deg_per_sec", j.rotPerSec,
 	)
 	return j, nil
 }

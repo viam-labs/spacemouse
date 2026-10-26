@@ -3,6 +3,18 @@
 `viam:spacemouse:jog` turns a 6-axis `input_controller` into fluid end-effector
 motion via the motion service's teleop pipeline.
 
+End-effector speed is bounded directly by `translation_mm_per_sec` and
+`rotation_deg_per_sec` — the service maintains a virtual goal pose that
+advances at that rate, independent of the arm's physical maximum.
+
+Joint velocity is independently bounded via Jacobian scaling: each tick the
+service computes the Jacobian at the arm's current configuration, projects
+the TCP delta into joint space, and scales the TCP delta down if any joint
+would exceed `max_joint_vel_degs_per_sec`. This prevents singularity whips
+(near a singularity, tiny TCP motion requires huge joint motion). Damped
+least-squares makes the behavior smooth right up to the singularity instead
+of blowing up.
+
 ## Prerequisites
 
 - An arm.
@@ -23,8 +35,8 @@ motion via the motion service's teleop pipeline.
   "attributes": {
     "arm": "my-arm",
     "input_controller": "my-spacemouse",
-    "translation_mm_per_sec": 50,
-    "rotation_deg_per_sec": 20
+    "translation_mm_per_sec": 100,
+    "rotation_deg_per_sec": 45
   }
 }
 ```
@@ -35,15 +47,25 @@ motion via the motion service's teleop pipeline.
 | `input_controller` *(req)*| —          | Input controller resource name.                                          |
 | `motion`                  | `"motion"` | Name of the motion service.                                              |
 | `deadband`                | `0.05`     | Minimum axis magnitude to register.                                      |
-| `translation_mm_per_sec`  | `100`      | EE speed at full stick.                                                  |
-| `rotation_deg_per_sec`    | `45`       | EE rotation speed at full stick.                                         |
+| `translation_mm_per_sec`  | `100`      | TCP speed at full stick, in mm/s. Direct cap.                            |
+| `rotation_deg_per_sec`    | `45`       | TCP rotation speed at full stick, in deg/s. Direct cap.                  |
+| `max_joint_vel_degs_per_sec` | `60`    | Per-joint velocity cap enforced via Jacobian scaling. Prevents whipping near singularities. |
 | `tick_hz`                 | `50`       | Drain loop rate.                                                         |
-| `lookahead_ms`            | `300`      | How far ahead the goal pose is placed each tick.                         |
 
-## Tuning
+## Speed guide
 
-Start at `translation_mm_per_sec: 10` / `rotation_deg_per_sec: 5` and double
-until the arm moves at a comfortable rate.
+| use case              | `translation_mm_per_sec` | `rotation_deg_per_sec` |
+|-----------------------|--------------------------|------------------------|
+| careful alignment     | `25`–`50`                | `10`–`20`              |
+| general teleop        | `100`                    | `45`                   |
+| rapid repositioning   | `200`–`300`              | `90`                   |
+
+Both knobs are hard caps on the virtual goal's advance rate — the actual arm
+tracks the goal, so TCP speed matches what you configure (bounded by the
+arm's own physical capability if you set the knob higher than the arm can
+move).
+
+## Motion service attributes
 
 The motion-service attributes shown above are the smoothness/interpolation
 knobs the teleop pipeline consumes. The defaults in a stock motion service
