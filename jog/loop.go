@@ -125,21 +125,22 @@ func (j *jog) tick() {
 	}
 
 	// Project the TCP delta into joint-space via the Jacobian at the current
-	// config. If any joint would exceed its velocity cap (common near
-	// singularities, where small TCP motion requires huge joint motion), scale
-	// the TCP delta down proportionally and base the goal on arm's actual pose
-	// instead of accumulating virtualGoal — otherwise the goal keeps drifting
-	// ahead in joint space even as we scale per-tick deltas.
-	scale, maxJointDeltaRad := j.scaleForJointLimit(currentInputs, delta, dtSec)
-	if scale < 1.0 {
-		j.logger.CInfof(j.cancelCtx, "jacobian scale=%.3f max_joint_delta=%.3frad budget=%.3frad inputs=%v",
-			scale, maxJointDeltaRad, j.maxJointVelRads*dtSec, inputsAsSlice(currentInputs))
-		delta.X *= scale
-		delta.Y *= scale
-		delta.Z *= scale
-		delta.RX *= scale
-		delta.RY *= scale
-		delta.RZ *= scale
+	// config. Scale translation and rotation independently so a wrist
+	// singularity (which would require huge joint motion for small orientation
+	// changes) doesn't throttle translation too. When either scales down, we
+	// also reset base to currentPose so the goal doesn't drift ahead in joint
+	// space while per-tick deltas get clipped.
+	scaleT, scaleR, maxJointTrans, maxJointRot := j.scaleForJointLimitSplit(currentInputs, delta, dtSec)
+	if scaleT < 1.0 || scaleR < 1.0 {
+		j.logger.CInfof(j.cancelCtx,
+			"jacobian scale_t=%.3f scale_r=%.3f joint_trans=%.3frad joint_rot=%.3frad budget=%.3frad inputs=%v",
+			scaleT, scaleR, maxJointTrans, maxJointRot, j.maxJointVelRads*dtSec, inputsAsSlice(currentInputs))
+		delta.X *= scaleT
+		delta.Y *= scaleT
+		delta.Z *= scaleT
+		delta.RX *= scaleR
+		delta.RY *= scaleR
+		delta.RZ *= scaleR
 		base = currentPose
 	}
 
@@ -244,32 +245,43 @@ func (j *jog) anyAxisAboveDeadband(vel [6]float64) bool {
 	return false
 }
 
-// scaleForJointLimit returns a factor in [0,1] that scales the TCP delta so no
-// joint would exceed maxJointVelRads × dt. Second return is the predicted
-// max absolute joint delta in radians (for logging). Returns (1.0, 0) if under
-// the limit or if the Jacobian/DLS calculation fails (we log and don't gate on it).
-func (j *jog) scaleForJointLimit(inputs []referenceframe.Input, d poseDeltaStep, dtSec float64) (float64, float64) {
+// scaleForJointLimitSplit returns (scaleTrans, scaleRot, maxJointTrans,
+// maxJointRot). Translation and rotation are scaled independently so a
+// singularity in one axis doesn't choke the other. Both scales are 1.0 if
+// Jacobian/DLS fails.
+func (j *jog) scaleForJointLimitSplit(inputs []referenceframe.Input, d poseDeltaStep, dtSec float64) (float64, float64, float64, float64) {
 	J, err := jacobianAt(j.kinematic, inputs)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "jacobian compute failed", "err", err)
-		return 1.0, 0
+		return 1.0, 1.0, 0, 0
 	}
-	tcpDelta := []float64{
-		d.X, d.Y, d.Z,
-		d.RX * math.Pi / 180, d.RY * math.Pi / 180, d.RZ * math.Pi / 180,
-	}
-	jointDelta, err := solveDLS(J, tcpDelta, dlsLambda)
+	transTCP := []float64{d.X, d.Y, d.Z, 0, 0, 0}
+	rotTCP := []float64{0, 0, 0,
+		d.RX * math.Pi / 180, d.RY * math.Pi / 180, d.RZ * math.Pi / 180}
+
+	jointTrans, err := solveDLS(J, transTCP, dlsLambda)
 	if err != nil {
-		j.logger.CWarnw(j.cancelCtx, "DLS solve failed", "err", err)
-		return 1.0, 0
+		j.logger.CWarnw(j.cancelCtx, "DLS solve failed (trans)", "err", err)
+		return 1.0, 1.0, 0, 0
 	}
-	maxAbs := 0.0
-	for _, d := range jointDelta {
-		if a := math.Abs(d); a > maxAbs {
-			maxAbs = a
+	jointRot, err := solveDLS(J, rotTCP, dlsLambda)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "DLS solve failed (rot)", "err", err)
+		return 1.0, 1.0, 0, 0
+	}
+	return jointVelScale(jointTrans, j.maxJointVelRads, dtSec),
+		jointVelScale(jointRot, j.maxJointVelRads, dtSec),
+		maxAbs(jointTrans), maxAbs(jointRot)
+}
+
+func maxAbs(xs []float64) float64 {
+	m := 0.0
+	for _, x := range xs {
+		if a := math.Abs(x); a > m {
+			m = a
 		}
 	}
-	return jointVelScale(jointDelta, j.maxJointVelRads, dtSec), maxAbs
+	return m
 }
 
 func inputsAsSlice(inputs []referenceframe.Input) []float64 {
