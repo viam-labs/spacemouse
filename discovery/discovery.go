@@ -73,6 +73,9 @@ func (s *service) DiscoverResources(_ context.Context, _ map[string]any) ([]reso
 		if inst.SerialNumber != "" {
 			attrs["serial"] = inst.SerialNumber
 		}
+		if inst.Path != "" {
+			attrs["device_path"] = inst.Path
+		}
 		configs = append(configs, resource.Config{
 			Name:       suggestedName(inst),
 			API:        input.API,

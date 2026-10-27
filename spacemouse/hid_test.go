@@ -32,7 +32,7 @@ func (ec *eventCollector) snapshot() []input.Event {
 func TestHandleReport_AxisChangeEmitsEvent(t *testing.T) {
 	d := *LookupDevice(0x256f, 0xc63a)
 	ec := &eventCollector{}
-	r := NewReader(d, "", logging.NewTestLogger(t), ec.record)
+	r := NewReader(d, "", "", logging.NewTestLogger(t), ec.record)
 
 	report := make([]byte, 13)
 	report[0] = 1
@@ -50,7 +50,7 @@ func TestHandleReport_AxisChangeEmitsEvent(t *testing.T) {
 func TestHandleReport_SameValueDoesNotRepeat(t *testing.T) {
 	d := *LookupDevice(0x256f, 0xc63a)
 	ec := &eventCollector{}
-	r := NewReader(d, "", logging.NewTestLogger(t), ec.record)
+	r := NewReader(d, "", "", logging.NewTestLogger(t), ec.record)
 
 	report := make([]byte, 13)
 	report[0] = 1
@@ -67,7 +67,7 @@ func TestHandleReport_SameValueDoesNotRepeat(t *testing.T) {
 func TestHandleReport_ButtonPressReleaseTransitions(t *testing.T) {
 	d := *LookupDevice(0x256f, 0xc63a)
 	ec := &eventCollector{}
-	r := NewReader(d, "", logging.NewTestLogger(t), ec.record)
+	r := NewReader(d, "", "", logging.NewTestLogger(t), ec.record)
 
 	// Press left.
 	r.handleReport([]byte{3, 0b01, 0, 0})
@@ -87,7 +87,7 @@ func TestHandleReport_ButtonPressReleaseTransitions(t *testing.T) {
 
 func TestSnapshot_TracksLatest(t *testing.T) {
 	d := *LookupDevice(0x256f, 0xc63a)
-	r := NewReader(d, "", logging.NewTestLogger(t), func(input.Event) {})
+	r := NewReader(d, "", "", logging.NewTestLogger(t), func(input.Event) {})
 
 	report := make([]byte, 13)
 	report[0] = 1
