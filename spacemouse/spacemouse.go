@@ -16,11 +16,14 @@ import (
 // Model is the registered Viam model for this input_controller.
 var Model = resource.NewModel("viam", "spacemouse", "controller")
 
-// Config picks a specific SpaceMouse by USB vendor/product ID and optional serial.
+// Config picks a specific SpaceMouse by USB vendor/product ID, with optional
+// serial or OS device path for disambiguation when multiple identical devices
+// are plugged in. DevicePath takes precedence over Serial when both are set.
 type Config struct {
-	VendorID  string `json:"vendor_id"`
-	ProductID string `json:"product_id"`
-	Serial    string `json:"serial,omitempty"`
+	VendorID   string `json:"vendor_id"`
+	ProductID  string `json:"product_id"`
+	Serial     string `json:"serial,omitempty"`
+	DevicePath string `json:"device_path,omitempty"`
 }
 
 // Validate requires vendor_id and product_id and checks they parse as hex.
@@ -90,7 +93,7 @@ func newSpaceMouse(
 		callbacks:  map[input.Control]map[input.EventType]input.ControlFunction{},
 	}
 
-	sm.reader = NewReader(dev, cfg.Serial, logger, sm.dispatch)
+	sm.reader = NewReader(dev, cfg.Serial, cfg.DevicePath, logger, sm.dispatch)
 	sm.workers = utils.NewBackgroundStoppableWorkers(sm.reader.Run)
 
 	logger.CInfow(ctx, "spacemouse initialized",

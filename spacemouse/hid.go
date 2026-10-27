@@ -19,6 +19,7 @@ const axisEpsilon = 1.0 / 350.0
 type Reader struct {
 	dev     Device
 	serial  string
+	path    string
 	logger  logging.Logger
 	onEvent func(input.Event)
 
@@ -34,9 +35,12 @@ type hidHandle interface {
 	Close() error
 }
 
-var hidOpen = func(vid, pid uint16, serial string) (hidHandle, error) {
+var hidOpen = func(vid, pid uint16, serial, path string) (hidHandle, error) {
 	if err := hid.Init(); err != nil {
 		return nil, err
+	}
+	if path != "" {
+		return hid.OpenPath(path)
 	}
 	if serial == "" {
 		return hid.OpenFirst(vid, pid)
@@ -44,8 +48,9 @@ var hidOpen = func(vid, pid uint16, serial string) (hidHandle, error) {
 	return hid.Open(vid, pid, serial)
 }
 
-// NewReader constructs a Reader for the given device entry.
-func NewReader(d Device, serial string, logger logging.Logger, onEvent func(input.Event)) *Reader {
+// NewReader constructs a Reader for the given device entry. If path is
+// non-empty it takes precedence over vendor/product/serial matching.
+func NewReader(d Device, serial, path string, logger logging.Logger, onEvent func(input.Event)) *Reader {
 	// Seed to false so the first report doesn't fire ButtonRelease for a button that was never pressed.
 	initialButtons := make(map[input.Control]bool, len(d.Buttons))
 	for _, b := range d.Buttons {
@@ -54,6 +59,7 @@ func NewReader(d Device, serial string, logger logging.Logger, onEvent func(inpu
 	return &Reader{
 		dev:         d,
 		serial:      serial,
+		path:        path,
 		logger:      logger,
 		onEvent:     onEvent,
 		lastButtons: initialButtons,
@@ -90,7 +96,7 @@ func (r *Reader) Run(ctx context.Context) {
 			r.emitDisconnect()
 			return
 		}
-		h, err := hidOpen(r.dev.VendorID, r.dev.ProductID, r.serial)
+		h, err := hidOpen(r.dev.VendorID, r.dev.ProductID, r.serial, r.path)
 		if err != nil {
 			r.logger.CDebugw(ctx, "hid open failed, will retry", "device", r.dev.Name, "err", err)
 			if !sleep(ctx, backoff) {
@@ -301,11 +307,16 @@ type DeviceInstance struct {
 }
 
 // Some OSes enumerate a single device multiple times (one entry per HID usage page).
+// When SerialNumber is empty (e.g. 3Dconnexion Universal Receivers), each distinct
+// Path represents a different physical device and must not be deduped away.
 func dedupe(in []DeviceInstance) []DeviceInstance {
 	seen := map[string]bool{}
 	out := in[:0]
 	for _, inst := range in {
 		key := inst.Device.Name + "|" + inst.SerialNumber
+		if inst.SerialNumber == "" {
+			key += "|" + inst.Path
+		}
 		if seen[key] {
 			continue
 		}
