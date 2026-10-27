@@ -21,7 +21,6 @@ import (
 	"go.viam.com/rdk/utils"
 )
 
-const referenceFrame = "world"
 
 // Model is the registered Viam model.
 var Model = resource.NewModel("viam", "spacemouse", "jog")
@@ -224,12 +223,14 @@ func newJog(
 	return j, nil
 }
 
-func poseInFrameJSON(pose spatialmath.Pose) string {
+// Goals go in the arm's own base frame — EndPosition returns arm-local
+// coords, so labeling them as world breaks reach checks when the arm isn't at origin.
+func (j *jog) poseInFrameJSON(pose spatialmath.Pose) string {
 	pt := pose.Point()
 	ov := pose.Orientation().OrientationVectorDegrees()
 	return fmt.Sprintf(
 		`{"reference_frame":"%s","pose":{"x":%f,"y":%f,"z":%f,"o_x":%f,"o_y":%f,"o_z":%f,"theta":%f}}`,
-		referenceFrame, pt.X, pt.Y, pt.Z, ov.OX, ov.OY, ov.OZ, ov.Theta,
+		j.armName, pt.X, pt.Y, pt.Z, ov.OX, ov.OY, ov.OZ, ov.Theta,
 	)
 }
 
@@ -240,7 +241,7 @@ func (j *jog) openPipeline(ctx context.Context) error {
 	}
 	startReq := fmt.Sprintf(
 		`{"name":"builtin","component_name":"%s","destination":%s}`,
-		j.armName, poseInFrameJSON(currentPose),
+		j.armName, j.poseInFrameJSON(currentPose),
 	)
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
@@ -254,7 +255,7 @@ func (j *jog) sendGoal(ctx context.Context, pose spatialmath.Pose) error {
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	_, err := j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
-		"teleop_move":    poseInFrameJSON(pose),
+		"teleop_move":    j.poseInFrameJSON(pose),
 		"component_name": j.armName,
 	})
 	return err
