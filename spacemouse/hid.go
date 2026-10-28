@@ -289,6 +289,7 @@ const (
 	usageMultiAxisCtrl      = 0x08
 )
 
+// EnumerateConnected returns all connected spacemouse HID devices.
 func EnumerateConnected() ([]DeviceInstance, error) {
 	if err := hid.Init(); err != nil {
 		return nil, err
