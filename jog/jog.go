@@ -122,6 +122,11 @@ type jog struct {
 	// movePending gates a single in-flight goal send; ticks drop otherwise.
 	movePending atomic.Bool
 
+	// pipelineOpen tracks whether we have an active teleop pipeline. We close
+	// it on idle to avoid stale planning state leaking into the next session,
+	// and reopen on the next active tick.
+	pipelineOpen atomic.Bool
+
 	moveMu       sync.Mutex
 	moving       bool
 	lastSentPose spatialmath.Pose
@@ -255,10 +260,13 @@ func (j *jog) openPipeline(ctx context.Context) error {
 	)
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
-	_, err = j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
+	if _, err = j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
 		"teleop_start": startReq,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	j.pipelineOpen.Store(true)
+	return nil
 }
 
 func (j *jog) sendGoal(ctx context.Context, pose spatialmath.Pose) error {
@@ -277,6 +285,7 @@ func (j *jog) closePipeline(ctx context.Context) {
 	if _, err := j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{"teleop_stop": ""}); err != nil {
 		j.logger.CWarnw(cmdCtx, "close pipeline failed", "err", err)
 	}
+	j.pipelineOpen.Store(false)
 }
 
 // DoCommand exposes current velocities so operators can sanity-check the input path.
