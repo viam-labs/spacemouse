@@ -117,7 +117,7 @@ func (j *jog) tick() {
 		return
 	}
 
-	currentPose, err := j.arm.EndPosition(j.cancelCtx, nil)
+	currentPose, err := j.armPoseInWorld(j.cancelCtx)
 	if err != nil {
 		j.movePending.Store(false)
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed", "err", err)
@@ -232,7 +232,7 @@ func (j *jog) parkArm() {
 		j.moveMu.Unlock()
 	}()
 
-	pose, err := j.arm.EndPosition(j.cancelCtx, nil)
+	pose, err := j.armPoseInWorld(j.cancelCtx)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed on park", "err", err)
 		return
