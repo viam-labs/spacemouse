@@ -277,8 +277,6 @@ func abs(x float64) float64 {
 	return x
 }
 
-// EnumerateConnected returns every supported SpaceMouse currently plugged in.
-//
 // A SpaceMouse / 3Dconnexion wireless receiver typically exposes multiple HID
 // interfaces (keyboard, mouse, multi-axis controller, etc.). Only the
 // Multi-axis Controller interface (UsagePage 0x01, Usage 0x08) produces axis
@@ -289,6 +287,8 @@ const (
 	usageMultiAxisCtrl      = 0x08
 )
 
+// EnumerateConnected returns every supported SpaceMouse currently plugged in,
+// filtered to the Multi-axis Controller HID interface.
 func EnumerateConnected() ([]DeviceInstance, error) {
 	if err := hid.Init(); err != nil {
 		return nil, err

@@ -21,7 +21,6 @@ import (
 	"go.viam.com/rdk/utils"
 )
 
-
 // Model is the registered Viam model.
 var Model = resource.NewModel("viam", "spacemouse", "jog")
 
