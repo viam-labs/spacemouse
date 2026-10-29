@@ -121,6 +121,11 @@ type jog struct {
 	// movePending gates a single in-flight goal send; ticks drop otherwise.
 	movePending atomic.Bool
 
+	// pipelineOpen tracks whether we have an active teleop pipeline. We close
+	// it on idle to avoid stale planning state leaking into the next session,
+	// and reopen on the next active tick.
+	pipelineOpen atomic.Bool
+
 	moveMu       sync.Mutex
 	moving       bool
 	lastSentPose spatialmath.Pose
@@ -222,39 +227,52 @@ func newJog(
 	return j, nil
 }
 
-// Goals go in the arm's own base frame — EndPosition returns arm-local
-// coords, so labeling them as world breaks reach checks when the arm isn't at origin.
-func (j *jog) poseInFrameJSON(pose spatialmath.Pose) string {
+func poseInFrameJSON(pose spatialmath.Pose) string {
 	pt := pose.Point()
 	ov := pose.Orientation().OrientationVectorDegrees()
 	return fmt.Sprintf(
-		`{"reference_frame":"%s","pose":{"x":%f,"y":%f,"z":%f,"o_x":%f,"o_y":%f,"o_z":%f,"theta":%f}}`,
-		j.armName, pt.X, pt.Y, pt.Z, ov.OX, ov.OY, ov.OZ, ov.Theta,
+		`{"reference_frame":"world","pose":{"x":%f,"y":%f,"z":%f,"o_x":%f,"o_y":%f,"o_z":%f,"theta":%f}}`,
+		pt.X, pt.Y, pt.Z, ov.OX, ov.OY, ov.OZ, ov.Theta,
 	)
 }
 
+// armPoseInWorld returns the arm EE pose in world frame, regardless of where
+// the arm is placed. arm.EndPosition returns arm-local coords which breaks
+// the planner's reach check for arms off-origin; motion.GetPose handles the
+// framesystem transform for us.
+func (j *jog) armPoseInWorld(ctx context.Context) (spatialmath.Pose, error) {
+	pif, err := j.motionSvc.GetPose(ctx, j.armName, referenceframe.World, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return pif.Pose(), nil
+}
+
 func (j *jog) openPipeline(ctx context.Context) error {
-	currentPose, err := j.arm.EndPosition(ctx, nil)
+	currentPose, err := j.armPoseInWorld(ctx)
 	if err != nil {
 		return fmt.Errorf("read current pose: %w", err)
 	}
 	startReq := fmt.Sprintf(
 		`{"name":"builtin","component_name":"%s","destination":%s}`,
-		j.armName, j.poseInFrameJSON(currentPose),
+		j.armName, poseInFrameJSON(currentPose),
 	)
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
-	_, err = j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
+	if _, err = j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
 		"teleop_start": startReq,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	j.pipelineOpen.Store(true)
+	return nil
 }
 
 func (j *jog) sendGoal(ctx context.Context, pose spatialmath.Pose) error {
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	_, err := j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{
-		"teleop_move":    j.poseInFrameJSON(pose),
+		"teleop_move":    poseInFrameJSON(pose),
 		"component_name": j.armName,
 	})
 	return err
@@ -266,6 +284,7 @@ func (j *jog) closePipeline(ctx context.Context) {
 	if _, err := j.motionSvc.DoCommand(cmdCtx, map[string]interface{}{"teleop_stop": ""}); err != nil {
 		j.logger.CWarnw(cmdCtx, "close pipeline failed", "err", err)
 	}
+	j.pipelineOpen.Store(false)
 }
 
 // DoCommand exposes current velocities so operators can sanity-check the input path.

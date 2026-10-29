@@ -117,7 +117,17 @@ func (j *jog) tick() {
 		return
 	}
 
-	currentPose, err := j.arm.EndPosition(j.cancelCtx, nil)
+	// Re-open the pipeline on idle→active transition. parkArm closed it so
+	// stale planning state wouldn't leak into the next activity burst.
+	if !j.pipelineOpen.Load() {
+		if err := j.openPipeline(j.cancelCtx); err != nil {
+			j.movePending.Store(false)
+			j.logger.CWarnw(j.cancelCtx, "pipeline open on activation failed", "err", err)
+			return
+		}
+	}
+
+	currentPose, err := j.armPoseInWorld(j.cancelCtx)
 	if err != nil {
 		j.movePending.Store(false)
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed", "err", err)
@@ -230,9 +240,12 @@ func (j *jog) parkArm() {
 		j.moveMu.Lock()
 		j.virtualGoal = nil
 		j.moveMu.Unlock()
+		// Close the pipeline so stale planning state doesn't leak into the
+		// next activity burst. Next active tick re-opens fresh.
+		j.closePipeline(j.cancelCtx)
 	}()
 
-	pose, err := j.arm.EndPosition(j.cancelCtx, nil)
+	pose, err := j.armPoseInWorld(j.cancelCtx)
 	if err != nil {
 		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed on park", "err", err)
 		return
