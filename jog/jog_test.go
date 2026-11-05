@@ -69,7 +69,7 @@ func TestApplyDelta_RotationChangesOrientation(t *testing.T) {
 	test.That(t, ori.Theta, test.ShouldAlmostEqual, 10.0*3.141592653589793/180.0, 1e-9)
 }
 
-func TestTick_BelowDeadbandSkipsArmCalls(t *testing.T) {
+func TestTickFast_BelowDeadbandSkipsArmCalls(t *testing.T) {
 	j := fiftyHz(t, 0.1)
 	a := &inject.Arm{}
 	var endPosCalls, moveCalls int
@@ -84,7 +84,7 @@ func TestTick_BelowDeadbandSkipsArmCalls(t *testing.T) {
 	j.arm = a
 
 	j.velocities = [6]float64{0.05, 0.05, 0.05, 0.05, 0.05, 0.05}
-	j.tick()
+	j.tickFast()
 
 	test.That(t, endPosCalls, test.ShouldEqual, 0)
 	test.That(t, moveCalls, test.ShouldEqual, 0)
@@ -149,7 +149,7 @@ func TestPoseDiffExceeds(t *testing.T) {
 	})
 }
 
-func TestTick_IdleToIdleIsNoop(t *testing.T) {
+func TestTickFast_IdleToIdleIsNoop(t *testing.T) {
 	// When velocity is below deadband and we haven't been moving, tick should
 	// read nothing from the arm and send no commands.
 	j := fiftyHz(t, 0.1)
@@ -161,7 +161,7 @@ func TestTick_IdleToIdleIsNoop(t *testing.T) {
 	}
 	j.arm = a
 	j.velocities = [6]float64{0.05, 0.05, 0.05, 0.05, 0.05, 0.05} // all below 0.1 deadband
-	j.tick()
+	j.tickFast()
 	test.That(t, endPosCalls, test.ShouldEqual, 0)
 	test.That(t, j.moving, test.ShouldBeFalse)
 }
@@ -231,6 +231,118 @@ func (f *fakeInput) fire(control input.Control, event input.EventType, value flo
 			Control: control, Event: event, Value: value,
 		})
 	}
+}
+
+func TestTickSlow_BelowDeadbandSkipsArmCalls(t *testing.T) {
+	j := fiftyHz(t, 0.1)
+	a := &inject.Arm{}
+	var endPosCalls, moveCalls int
+	a.EndPositionFunc = func(context.Context, map[string]interface{}) (spatialmath.Pose, error) {
+		endPosCalls++
+		return nil, nil
+	}
+	a.MoveToPositionFunc = func(context.Context, spatialmath.Pose, map[string]interface{}) error {
+		moveCalls++
+		return nil
+	}
+	j.arm = a
+
+	j.velocities = [6]float64{0.05, 0.05, 0.05, 0.05, 0.05, 0.05}
+	j.tickSlow()
+
+	test.That(t, endPosCalls, test.ShouldEqual, 0)
+	test.That(t, moveCalls, test.ShouldEqual, 0)
+	test.That(t, j.moving, test.ShouldBeFalse)
+}
+
+func TestTickSlow_AboveDeadbandCallsMoveToPosition(t *testing.T) {
+	j := fiftyHz(t, 0.1)
+	j.slowStepMM = 2.0
+	j.slowStepDeg = 1.0
+
+	start := spatialmath.NewPose(
+		r3.Vector{X: 100, Y: 200, Z: 300},
+		&spatialmath.R4AA{Theta: 0, RX: 1},
+	)
+	a := &inject.Arm{}
+	var moveCalls int
+	var gotPose spatialmath.Pose
+	a.EndPositionFunc = func(context.Context, map[string]interface{}) (spatialmath.Pose, error) {
+		return start, nil
+	}
+	a.MoveToPositionFunc = func(_ context.Context, p spatialmath.Pose, _ map[string]interface{}) error {
+		moveCalls++
+		gotPose = p
+		return nil
+	}
+	j.arm = a
+
+	// Full-stick X push: expect +2mm on X at full scale.
+	j.velocities = [6]float64{1.0, 0, 0, 0, 0, 0}
+	j.tickSlow()
+
+	test.That(t, moveCalls, test.ShouldEqual, 1)
+	test.That(t, gotPose.Point().X, test.ShouldAlmostEqual, 102.0)
+	test.That(t, gotPose.Point().Y, test.ShouldAlmostEqual, 200.0)
+	test.That(t, j.moving, test.ShouldBeTrue)
+}
+
+func TestTickSlow_ErrorSetsCooldown(t *testing.T) {
+	j := fiftyHz(t, 0.1)
+	j.slowStepMM = 1.0
+	j.slowStepDeg = 1.0
+
+	a := &inject.Arm{}
+	a.EndPositionFunc = func(context.Context, map[string]interface{}) (spatialmath.Pose, error) {
+		return spatialmath.NewPose(r3.Vector{}, &spatialmath.R4AA{Theta: 0, RX: 1}), nil
+	}
+	a.MoveToPositionFunc = func(context.Context, spatialmath.Pose, map[string]interface{}) error {
+		return context.DeadlineExceeded
+	}
+	j.arm = a
+	j.velocities = [6]float64{1.0, 0, 0, 0, 0, 0}
+
+	j.tickSlow()
+
+	test.That(t, j.errorUntil.After(time.Now()), test.ShouldBeTrue)
+}
+
+func TestToggleMode_FlipsAndClearsState(t *testing.T) {
+	j := fiftyHz(t, 0.1)
+	j.logger = logging.NewTestLogger(t)
+	j.virtualGoal = spatialmath.NewPose(r3.Vector{X: 1}, &spatialmath.R4AA{Theta: 0, RX: 1})
+	j.lastSentPose = spatialmath.NewPose(r3.Vector{X: 2}, &spatialmath.R4AA{Theta: 0, RX: 1})
+	j.moving = true
+
+	test.That(t, j.currentMode(), test.ShouldEqual, modeSlow)
+	j.toggleMode(context.Background(), input.Event{})
+	test.That(t, j.currentMode(), test.ShouldEqual, modeFast)
+	test.That(t, j.virtualGoal, test.ShouldBeNil)
+	test.That(t, j.lastSentPose, test.ShouldBeNil)
+	test.That(t, j.moving, test.ShouldBeFalse)
+
+	j.toggleMode(context.Background(), input.Event{})
+	test.That(t, j.currentMode(), test.ShouldEqual, modeSlow)
+}
+
+func TestConfigValidate_UnknownModeToggleButton(t *testing.T) {
+	_, _, err := (&Config{
+		ArmName:          "a",
+		InputName:        "i",
+		ModeToggleButton: "ButtonBogus",
+	}).Validate("/foo")
+	test.That(t, err, test.ShouldNotBeNil)
+}
+
+func TestConfigValidate_GripperAndModeTogglebuttonCollide(t *testing.T) {
+	_, _, err := (&Config{
+		ArmName:          "a",
+		InputName:        "i",
+		GripperName:      "g",
+		GripperButton:    "ButtonSelect",
+		ModeToggleButton: "ButtonSelect",
+	}).Validate("/foo")
+	test.That(t, err, test.ShouldNotBeNil)
 }
 
 // pin unused imports so the file compiles cleanly without "declared but not used" noise.
