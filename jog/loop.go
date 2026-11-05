@@ -54,6 +54,11 @@ func (j *jog) subscribe(ctx context.Context, ctrl input.Controller) error {
 			return fmt.Errorf("register gripper button %q: %w", j.gripperButton, err)
 		}
 	}
+
+	if err := ctrl.RegisterControlCallback(ctx, j.modeToggleButton,
+		[]input.EventType{input.ButtonPress}, j.toggleMode, nil); err != nil {
+		return fmt.Errorf("register mode_toggle_button %q: %w", j.modeToggleButton, err)
+	}
 	return nil
 }
 
@@ -83,12 +88,67 @@ func (j *jog) drainLoop() {
 		case <-j.cancelCtx.Done():
 			return
 		case <-ticker.C:
-			j.tick()
+			if j.currentMode() == modeFast {
+				j.tickFast()
+			} else {
+				j.tickSlow()
+			}
 		}
 	}
 }
 
-func (j *jog) tick() {
+// tickSlow runs one blocking arm.MoveToPosition per tick. The tick rate self-
+// limits to whatever the planner can sustain — holding the stick advances in
+// discrete, fully-planned steps.
+func (j *jog) tickSlow() {
+	vel := j.currentVelocities()
+	if !j.anyAxisAboveDeadband(vel) {
+		j.moveMu.Lock()
+		j.moving = false
+		j.moveMu.Unlock()
+		return
+	}
+
+	j.moveMu.Lock()
+	cooldownUntil := j.errorUntil
+	j.moveMu.Unlock()
+	if time.Now().Before(cooldownUntil) {
+		return
+	}
+
+	currentPose, err := j.arm.EndPosition(j.cancelCtx, nil)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "arm EndPosition failed (slow)", "err", err)
+		return
+	}
+	delta := poseDeltaStep{
+		X:  vel[0] * j.slowStepMM,
+		Y:  vel[1] * j.slowStepMM,
+		Z:  vel[2] * j.slowStepMM,
+		RX: vel[3] * j.slowStepDeg,
+		RY: vel[4] * j.slowStepDeg,
+		RZ: vel[5] * j.slowStepDeg,
+	}
+	goal, err := applyDelta(currentPose, delta)
+	if err != nil {
+		j.logger.CWarnw(j.cancelCtx, "pose composition failed (slow)", "err", err)
+		return
+	}
+
+	if err := j.arm.MoveToPosition(j.cancelCtx, goal, nil); err != nil {
+		j.logger.CWarnw(j.cancelCtx, "arm MoveToPosition failed (slow)", "err", err)
+		j.moveMu.Lock()
+		j.errorUntil = time.Now().Add(errorCooldown)
+		j.moveMu.Unlock()
+		return
+	}
+
+	j.moveMu.Lock()
+	j.moving = true
+	j.moveMu.Unlock()
+}
+
+func (j *jog) tickFast() {
 	vel := j.currentVelocities()
 	above := j.anyAxisAboveDeadband(vel)
 

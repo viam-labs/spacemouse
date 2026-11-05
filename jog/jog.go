@@ -1,4 +1,13 @@
 // Package jog jogs an arm's end effector from an input_controller's six absolute axes.
+//
+// Two modes:
+//
+//   - slow (default): per-tick arm.MoveToPosition with a small delta. Every
+//     move goes through the standard motion planner — steppy but robust.
+//   - fast: streams goal poses into the motion service's teleop pipeline for
+//     smooth continuous motion.
+//
+// Press the configured SpaceMouse button (mode_toggle_button) to flip modes.
 package jog
 
 import (
@@ -32,6 +41,8 @@ const (
 	defaultMaxJointVelDegsPerSec = 90.0
 	defaultMotionName            = "motion"
 	defaultGripperButton         = "ButtonMenu"
+	defaultSlowStepMM            = 1.0
+	defaultSlowStepDeg           = 1.0
 
 	posDeadbandMM  = 1.0
 	rotDeadbandDeg = 1.0
@@ -56,11 +67,17 @@ type Config struct {
 	GripperName   string `json:"gripper,omitempty"`
 	GripperButton string `json:"gripper_button,omitempty"`
 
+	ModeToggleButton string `json:"mode_toggle_button,omitempty"`
+
 	Deadband              *float64 `json:"deadband,omitempty"`
 	TranslationMMPerSec   *float64 `json:"translation_mm_per_sec,omitempty"`
 	RotationDegPerSec     *float64 `json:"rotation_deg_per_sec,omitempty"`
 	TickHz                *float64 `json:"tick_hz,omitempty"`
 	MaxJointVelDegsPerSec *float64 `json:"max_joint_vel_degs_per_sec,omitempty"`
+
+	// Slow-mode step per tick: delta = step × axis_value.
+	SlowStepMM  *float64 `json:"slow_step_mm,omitempty"`
+	SlowStepDeg *float64 `json:"slow_step_deg,omitempty"`
 }
 
 // Validate returns the deps the service requires.
@@ -70,6 +87,20 @@ func (c *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if c.InputName == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "input_controller")
+	}
+	if _, err := parseModeToggleButton(c.ModeToggleButton); err != nil {
+		return nil, nil, err
+	}
+	gripperButton := c.GripperButton
+	if gripperButton == "" {
+		gripperButton = defaultGripperButton
+	}
+	modeButton := c.ModeToggleButton
+	if modeButton == "" {
+		modeButton = defaultModeToggleButton
+	}
+	if c.GripperName != "" && gripperButton == modeButton {
+		return nil, nil, fmt.Errorf("gripper_button and mode_toggle_button cannot both be %q", modeButton)
 	}
 	motionName := c.MotionName
 	if motionName == "" {
@@ -114,6 +145,14 @@ type jog struct {
 	rotPerSec       float64
 	tickInterval    time.Duration
 	maxJointVelRads float64
+	slowStepMM      float64
+	slowStepDeg     float64
+
+	// modeMu serializes toggle handling so pipeline open/close and state
+	// resets don't race.
+	mode             atomic.Int32
+	modeMu           sync.Mutex
+	modeToggleButton input.Control
 
 	velMu      sync.RWMutex
 	velocities [6]float64
@@ -183,34 +222,36 @@ func newJog(
 	if gripperButton == "" {
 		gripperButton = defaultGripperButton
 	}
+	modeToggleButton, err := parseModeToggleButton(cfg.ModeToggleButton)
+	if err != nil {
+		return nil, err
+	}
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 	j := &jog{
-		Named:           conf.ResourceName().AsNamed(),
-		logger:          logger,
-		arm:             armRes,
-		armName:         cfg.ArmName,
-		motionSvc:       motionSvc,
-		kinematic:       kinematic,
-		gripper:         gripperRes,
-		gripperButton:   input.Control(gripperButton),
-		deadband:        firstNonNil(cfg.Deadband, defaultDeadband),
-		transPerSec:     firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
-		rotPerSec:       firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
-		tickInterval:    tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
-		maxJointVelRads: utils.DegToRad(firstNonNil(cfg.MaxJointVelDegsPerSec, defaultMaxJointVelDegsPerSec)),
-		cancelCtx:       cancelCtx,
-		cancelFunc:      cancelFunc,
+		Named:            conf.ResourceName().AsNamed(),
+		logger:           logger,
+		arm:              armRes,
+		armName:          cfg.ArmName,
+		motionSvc:        motionSvc,
+		kinematic:        kinematic,
+		gripper:          gripperRes,
+		gripperButton:    input.Control(gripperButton),
+		modeToggleButton: modeToggleButton,
+		deadband:         firstNonNil(cfg.Deadband, defaultDeadband),
+		transPerSec:      firstNonNil(cfg.TranslationMMPerSec, defaultTranslationMMPerSec),
+		rotPerSec:        firstNonNil(cfg.RotationDegPerSec, defaultRotationDegPerSec),
+		tickInterval:     tickInterval(firstNonNil(cfg.TickHz, defaultTickHz)),
+		maxJointVelRads:  utils.DegToRad(firstNonNil(cfg.MaxJointVelDegsPerSec, defaultMaxJointVelDegsPerSec)),
+		slowStepMM:       firstNonNil(cfg.SlowStepMM, defaultSlowStepMM),
+		slowStepDeg:      firstNonNil(cfg.SlowStepDeg, defaultSlowStepDeg),
+		cancelCtx:        cancelCtx,
+		cancelFunc:       cancelFunc,
 	}
 
 	if err := j.subscribe(ctx, inRes); err != nil {
 		cancelFunc()
 		return nil, fmt.Errorf("subscribe to input_controller: %w", err)
-	}
-
-	if err := j.openPipeline(ctx); err != nil {
-		cancelFunc()
-		return nil, fmt.Errorf("open pipeline: %w", err)
 	}
 
 	j.wg.Add(1)
@@ -223,6 +264,10 @@ func newJog(
 		"tick_interval_ms", j.tickInterval.Milliseconds(),
 		"translation_mm_per_sec", j.transPerSec,
 		"rotation_deg_per_sec", j.rotPerSec,
+		"mode", j.currentMode().String(),
+		"mode_toggle_button", modeToggleButton,
+		"slow_step_mm", j.slowStepMM,
+		"slow_step_deg", j.slowStepDeg,
 	)
 	return j, nil
 }
