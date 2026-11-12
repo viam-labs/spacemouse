@@ -141,6 +141,10 @@ func (r *Reader) readLoop(ctx context.Context, h hidHandle) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
+			// go-hid returns ErrTimeout on an idle puck, not (0, nil); treat it as "no data this window" and keep reading.
+			if errors.Is(err, hid.ErrTimeout) {
+				continue
+			}
 			r.logger.CDebugw(ctx, "hid read error, treating as disconnect", "device", r.dev.Name, "err", err)
 			return
 		}
